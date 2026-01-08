@@ -5,16 +5,22 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/server.ts",
-    "build": "tsc",
-    "start": "node dist/server.js"
+    "build": "tsc"
   },
   "dependencies": {
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "ioredis": "^4.28.5",
+    "redis": "^5.10.0",
     "ws": "^8.16.0"
   },
   "devDependencies": {
-    "typescript": "^5.4.0",
-    "tsx": "^4.7.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/ioredis": "^4.28.10",
     "@types/node": "^20.0.0",
-    "@types/ws": "^8.5.0"
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
   }
 }
