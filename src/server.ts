@@ -1,242 +1,358 @@
 // src/server.ts
+import express, { Request, Response, NextFunction } from "express";
+import cors from "cors";
+import Redis from "ioredis";
+console.log("🔥 BOOT server.ts — runtime REAL — 2026-01-08");
 
-import http from "http";
-import { WebSocketServer, WebSocket } from "ws";
 
-/**
- * SommelierLab Conversational Runtime
- * WS Protocol v1 (FINAL)
- */
+/* =======================
+   Tipos base
+======================= */
 
-const PORT: number = Number(process.env.PORT) || 3000;
+type Role = "user" | "assistant";
 
-/* ----------------------------- Types ----------------------------- */
-
-type Lang = "es" | "en" | "fr" | "de" | "it" | "pt" | "ca" | string;
-
-type WSMessageBase = {
-  v: 1;
-  type: string;
-  sessionId: string;
-  ts?: number;
-};
-
-type PingMsg = WSMessageBase & { type: "ping" };
-
-type SessionStartMsg = WSMessageBase & {
-  type: "session.start";
-  lang: Lang;
-  vino_id: string;
-  context?: Record<string, unknown>;
-};
-
-type UserMessageMsg = WSMessageBase & {
-  type: "user.message";
+type HistoryItem = {
+  role: Role;
   text: string;
+  ts: number;
 };
 
-type ClientToServer = PingMsg | SessionStartMsg | UserMessageMsg;
-
-type ServerToClient =
-  | (WSMessageBase & { type: "pong" })
-  | (WSMessageBase & {
-      type: "session.ready";
-      capabilities: { text: boolean; audio: boolean; streaming: boolean };
-    })
-  | (WSMessageBase & { type: "assistant.thinking" })
-  | (WSMessageBase & { type: "assistant.chunk"; delta: string })
-  | (WSMessageBase & {
-      type: "assistant.message";
-      text: string;
-      meta?: { confidence?: number; source?: string };
-    })
-  | (WSMessageBase & { type: "error"; code: string; message: string });
-
-/* --------------------------- Session --------------------------- */
+type AgentContext = {
+  language: string;
+  tenant: {
+    tenant_id: string;
+    bodega?: string | null;
+    estilo?: string | null;
+    voice_id?: string | null;
+  };
+  wine: any;
+};
 
 type SessionState = {
-  sessionId: string;
-  lang?: Lang;
-  vino_id?: string;
-  context?: Record<string, unknown>;
-  createdAt: number;
-  lastSeenAt: number;
+  agent_context: AgentContext;
+  history: HistoryItem[];
+  created_at: number;
+  updated_at: number;
 };
 
-const sessions = new Map<string, SessionState>();
+/* =======================
+   App
+======================= */
 
-function upsertSession(sessionId: string): SessionState {
-  const now = Date.now();
-  const existing = sessions.get(sessionId);
-  if (existing) {
-    existing.lastSeenAt = now;
-    return existing;
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "1mb" }));
+
+/**
+ * ⚠️ Railway
+ * - PORT debe venir de env
+ * - fallback 8080
+ */
+const PORT = Number(process.env.PORT || 8080);
+
+const REDIS_URL = process.env.REDIS_URL;
+const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
+const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
+const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
+const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
+
+/**
+ * ❗ No tiramos el proceso por Redis.
+ * Railway mata contenedores que crashean al boot.
+ */
+if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
+if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
+
+/* =======================
+   Redis (BLINDADO + LAZY)
+======================= */
+
+// ✅ FIX TS2709: tipo correcto para ioredis en TS/ESM
+type RedisClient = InstanceType<typeof Redis>;
+
+let redis: RedisClient | null = null;
+
+if (REDIS_URL) {
+  redis = new Redis(REDIS_URL, {
+    lazyConnect: true, // ⬅️ CLAVE
+    enableReadyCheck: false, // ⬅️ CLAVE
+    maxRetriesPerRequest: 1,
+    retryStrategy(times) {
+      return Math.min(times * 200, 2000);
+    },
+  });
+
+  redis.on("connect", () => console.log("🟢 Redis connected"));
+  redis.on("ready", () => console.log("🟢 Redis ready"));
+  redis.on("reconnecting", () => console.warn("🟡 Redis reconnecting"));
+  redis.on("close", () => console.warn("🟠 Redis connection closed"));
+
+  // ✅ FIX TS7006: tipado explícito
+  redis.on("error", (err: Error) =>
+    console.error("🔴 Redis error (handled):", err.message)
+  );
+}
+
+/* =======================
+   Utils
+======================= */
+
+const sessionKey = (id: string) => `sommelier:session:${id}`;
+const now = () => Date.now();
+
+function assertString(name: string, v: unknown): string {
+  if (!v || typeof v !== "string" || !v.trim()) {
+    throw new Error(`${name} missing`);
   }
-  const s: SessionState = {
-    sessionId,
-    createdAt: now,
-    lastSeenAt: now,
-  };
-  sessions.set(sessionId, s);
-  return s;
+  return v.trim();
 }
 
-/* --------------------------- Utils --------------------------- */
+async function httpPostJson<T>(url: string, body: any): Promise<T> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
 
-function safeJsonParse(raw: unknown): unknown | null {
-  try {
-    if (Buffer.isBuffer(raw)) return JSON.parse(raw.toString("utf8"));
-    if (typeof raw === "string") return JSON.parse(raw);
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-
-function send(ws: WebSocket, msg: ServerToClient) {
-  ws.send(JSON.stringify({ ...msg, ts: Date.now() }));
-}
-
-function sendError(
-  ws: WebSocket,
-  sessionId: string,
-  code: string,
-  message: string
-) {
-  send(ws, { v: 1, type: "error", sessionId, code, message });
-}
-
-function validateClientMsg(payload: unknown): ClientToServer | null {
-  if (!isObject(payload)) return null;
-
-  const { v, type, sessionId } = payload;
-  if (v !== 1 || typeof type !== "string" || typeof sessionId !== "string")
-    return null;
-
-  if (type === "ping") return { v: 1, type: "ping", sessionId };
-
-  if (type === "session.start") {
-    const { lang, vino_id, context } = payload;
-    if (typeof lang !== "string" || typeof vino_id !== "string") return null;
-    return {
-  v: 1,
-  type: "session.start",
-  sessionId,
-  lang,
-  vino_id,
-  context: context as Record<string, unknown> | undefined,
-};
-
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} calling ${url}: ${text}`);
   }
 
-  if (type === "user.message") {
-    const { text } = payload;
-    if (typeof text !== "string") return null;
-    return { v: 1, type: "user.message", sessionId, text };
-  }
-
-  return null;
+  return (await res.json()) as T;
 }
 
-/* --------------------------- Stub --------------------------- */
+/* =======================
+   Logs middleware
+======================= */
 
-async function generateSommelierReply(input: {
-  lang: Lang;
-  vino_id: string;
-  userText: string;
-}): Promise<string> {
-  return input.lang.startsWith("es")
-    ? `Para ${input.vino_id}: marida muy bien con carnes blancas, quesos curados y platos mediterráneos.`
-    : `For ${input.vino_id}: pairs well with white meats, aged cheeses, and Mediterranean dishes.`;
-}
-
-/* --------------------------- HTTP + WS --------------------------- */
-
-const server = http.createServer((req, res) => {
-  if (req.url === "/health") {
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ok: true }));
-    return;
-  }
-  res.writeHead(200);
-  res.end("SommelierLab conv-runtime running");
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  const rid = Math.random().toString(16).slice(2, 10);
+  (req as any).__rid = rid;
+  (req as any).__start = now();
+  console.log(`[${rid}] --> ${req.method} ${req.url}`);
+  next();
 });
 
-const wss = new WebSocketServer({ server });
+app.use((req: Request, res: Response, next: NextFunction) => {
+  res.on("finish", () => {
+    const rid = (req as any).__rid;
+    const start = (req as any).__start;
+    console.log(
+      `[${rid}] <-- ${req.method} ${req.url} ${res.statusCode} (${now() - start}ms)`
+    );
+  });
+  next();
+});
 
-wss.on("connection", (ws) => {
-  ws.on("message", async (raw) => {
-    const payload = safeJsonParse(raw);
-    const msg = validateClientMsg(payload);
+/* =======================
+   Routes
+======================= */
 
-    const fallbackSessionId =
-      isObject(payload) && typeof payload.sessionId === "string"
-        ? payload.sessionId
-        : "unknown";
+app.get("/", (_req: Request, res: Response) => {
+  res.type("text/plain").send("SommelierLab conv-runtime running");
+});
 
-    if (!msg) {
-      sendError(ws, fallbackSessionId, "INVALID_MESSAGE", "Mensaje inválido");
-      return;
+/**
+ * Healthcheck Railway-safe
+ * ❗ NUNCA rompe el servicio
+ */
+app.get("/health", async (_req: Request, res: Response) => {
+  try {
+    if (redis) {
+      // lazyConnect -> conectamos bajo demanda
+      await redis.connect().catch(() => {});
+      await redis.set("test:ping", "ok", "EX", 5).catch(() => {});
     }
 
-    const session = upsertSession(msg.sessionId);
+    res.json({
+      ok: true,
+      redis: redis ? "available" : "disabled",
+      ttl_seconds: SESSION_TTL_SECONDS,
+      has_env: {
+        REDIS_URL: !!REDIS_URL,
+        N8N_CONTEXT_URL: !!N8N_CONTEXT_URL,
+        N8N_CHAT_URL: !!N8N_CHAT_URL,
+      },
+    });
+  } catch {
+    res.json({ ok: true, redis: "degraded" });
+  }
+});
 
-    try {
-      if (msg.type === "ping") {
-        send(ws, { v: 1, type: "pong", sessionId: msg.sessionId });
-        return;
+/* =======================
+   Session init
+======================= */
+
+app.post("/session/init", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {}); // asegura conexión
+
+    const session_id = assertString("session_id", req.body.session_id);
+    const vino_id = assertString("vino_id", req.body.vino_id);
+    const anyada = assertString("anyada", req.body.anyada);
+    const lang = String(req.body.lang ?? "es").toLowerCase();
+    const tenant_id = String(req.body.tenant_id ?? "default");
+
+    const ctxResp = await httpPostJson<{
+      ok: boolean;
+      agent_context: AgentContext;
+    }>(N8N_CONTEXT_URL!, {
+      vino_id,
+      anyada,
+      lang,
+      tenant_id,
+      session_id,
+    });
+
+    if (!ctxResp?.agent_context) {
+      throw new Error("n8n context missing agent_context");
+    }
+
+    const state: SessionState = {
+      agent_context: ctxResp.agent_context,
+      history: [],
+      created_at: now(),
+      updated_at: now(),
+    };
+
+    await redis.set(
+      sessionKey(session_id),
+      JSON.stringify(state),
+      "EX",
+      SESSION_TTL_SECONDS
+    );
+
+    res.json({
+      ok: true,
+      session_id,
+      ttl_seconds: SESSION_TTL_SECONDS,
+      language: state.agent_context.language,
+      tenant: state.agent_context.tenant?.tenant_id,
+      wine_name: state.agent_context.wine?.identidad?.nombre ?? null,
+    });
+  } catch (e: any) {
+    res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/* =======================
+   Chat
+======================= */
+
+app.post("/chat", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {}); // asegura conexión
+
+    const session_id = assertString("session_id", req.body.session_id);
+    const userText = assertString("userText", req.body.userText);
+
+    const raw = await redis.get(sessionKey(session_id));
+    if (!raw) {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
+
+    const state = JSON.parse(raw) as SessionState;
+
+    const history: HistoryItem[] = [
+      ...(state.history ?? []),
+      // ✅ FIX TS2322: literal narrow
+      { role: "user" as Role, text: userText, ts: now() },
+    ];
+
+    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(
+      N8N_CHAT_URL!,
+      {
+        session_id,
+        userText,
+        history,
+        agent_context: state.agent_context,
       }
+    );
 
-      if (msg.type === "session.start") {
-        session.lang = msg.lang;
-        session.vino_id = msg.vino_id;
-        send(ws, {
-          v: 1,
-          type: "session.ready",
-          sessionId: msg.sessionId,
-          capabilities: { text: true, audio: false, streaming: true },
-        });
-        return;
-      }
+    if (!chatResp?.text) {
+      throw new Error("n8n chat missing text");
+    }
 
-      if (msg.type === "user.message") {
-        if (!session.lang || !session.vino_id) {
-          sendError(ws, msg.sessionId, "SESSION_NOT_READY", "session.start requerido");
-          return;
-        }
+    const assistantText = chatResp.text.trim();
 
-        send(ws, { v: 1, type: "assistant.thinking", sessionId: msg.sessionId });
+    const nextState: SessionState = {
+      ...state,
+      history: [
+        ...history,
+        // ✅ FIX TS2322: literal narrow
+        { role: "assistant" as Role, text: assistantText, ts: now() },
+      ].slice(-30),
+      updated_at: now(),
+    };
 
-        send(ws, {
-          v: 1,
-          type: "assistant.chunk",
-          sessionId: msg.sessionId,
-          delta: "Analizando… ",
-        });
+    await redis.set(
+      sessionKey(session_id),
+      JSON.stringify(nextState),
+      "EX",
+      SESSION_TTL_SECONDS
+    );
 
-        const text = await generateSommelierReply({
-          lang: session.lang,
-          vino_id: session.vino_id,
-          userText: msg.text,
-        });
+    res.json({
+      ok: true,
+      session_id,
+      text: assistantText,
+      history_len: nextState.history.length,
+    });
+  } catch (e: any) {
+    res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
 
-        send(ws, {
-          v: 1,
-          type: "assistant.message",
-          sessionId: msg.sessionId,
-          text,
-        });
-      }
-    } catch (e) {
-      sendError(ws, fallbackSessionId, "INTERNAL_ERROR", "Error interno");
+/* =======================
+   Debug
+======================= */
+
+app.get("/debug/session/:id", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {}); // asegura conexión
+
+    const token = String(req.query.token ?? "");
+    if (DEBUG_TOKEN && token !== DEBUG_TOKEN) {
+      return res.status(403).json({ ok: false, error: "forbidden" });
+    }
+
+    const key = sessionKey(req.params.id);
+    const raw = await redis.get(key);
+    const ttl = await redis.ttl(key);
+
+    res.json({
+      ok: true,
+      exists: !!raw,
+      ttl_seconds: ttl,
+      state: raw ? JSON.parse(raw) : null,
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/* =======================
+   Start / Shutdown
+======================= */
+
+/**
+ * ⬅️ CRÍTICO PARA RAILWAY
+ */
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`🚀 conv-runtime listening on ${PORT}`);
+});
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received. Shutting down cleanly...");
+  server.close(() => {
+    if (redis) {
+      redis.quit().finally(() => process.exit(0));
+    } else {
+      process.exit(0);
     }
   });
-});
-
-server.listen(PORT, () => {
-  console.log(`🚀 conv-runtime listening on ${PORT}`);
 });
