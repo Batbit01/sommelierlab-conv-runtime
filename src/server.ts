@@ -1,9 +1,10 @@
 // src/server.ts
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import Redis from "ioredis";
-console.log("🔥 BOOT server.ts — runtime REAL — 2026-01-08");
 
+console.log("🔥 BOOT server.ts — runtime REAL — 2026-01-08");
 
 /* =======================
    Tipos base
@@ -40,46 +41,47 @@ type SessionState = {
 ======================= */
 
 const app = express();
+
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
-/**
- * ⚠️ Railway
- * - PORT debe venir de env
- * - fallback 8080
- */
+/* =======================
+   ENV
+======================= */
+
 const PORT = Number(process.env.PORT || 8080);
 
 const REDIS_URL = process.env.REDIS_URL;
 const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
 const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
+
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
+
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
 
-/**
- * ❗ No tiramos el proceso por Redis.
- * Railway mata contenedores que crashean al boot.
- */
 if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
 if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
 
 /* =======================
-   Redis (BLINDADO + LAZY)
+   Redis
 ======================= */
 
-// ✅ FIX TS2709: tipo correcto para ioredis en TS/ESM
 type RedisClient = InstanceType<typeof Redis>;
 
 let redis: RedisClient | null = null;
 
 if (REDIS_URL) {
+
   redis = new Redis(REDIS_URL, {
-    lazyConnect: true, // ⬅️ CLAVE
-    enableReadyCheck: false, // ⬅️ CLAVE
+
+    lazyConnect: true,
+    enableReadyCheck: false,
     maxRetriesPerRequest: 1,
+
     retryStrategy(times) {
       return Math.min(times * 200, 2000);
     },
+
   });
 
   redis.on("connect", () => console.log("🟢 Redis connected"));
@@ -87,10 +89,10 @@ if (REDIS_URL) {
   redis.on("reconnecting", () => console.warn("🟡 Redis reconnecting"));
   redis.on("close", () => console.warn("🟠 Redis connection closed"));
 
-  // ✅ FIX TS7006: tipado explícito
   redis.on("error", (err: Error) =>
-    console.error("🔴 Redis error (handled):", err.message)
+    console.error("🔴 Redis error:", err.message)
   );
+
 }
 
 /* =======================
@@ -98,109 +100,144 @@ if (REDIS_URL) {
 ======================= */
 
 const sessionKey = (id: string) => `sommelier:session:${id}`;
+
 const now = () => Date.now();
 
 function assertString(name: string, v: unknown): string {
+
   if (!v || typeof v !== "string" || !v.trim()) {
     throw new Error(`${name} missing`);
   }
+
   return v.trim();
+
 }
 
 async function httpPostJson<T>(url: string, body: any): Promise<T> {
+
   const res = await fetch(url, {
+
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+
   });
 
   if (!res.ok) {
+
     const text = await res.text().catch(() => "");
+
     throw new Error(`HTTP ${res.status} calling ${url}: ${text}`);
+
   }
 
   return (await res.json()) as T;
+
 }
 
 /* =======================
-   Logs middleware
+   Logs
 ======================= */
 
 app.use((req: Request, _res: Response, next: NextFunction) => {
+
   const rid = Math.random().toString(16).slice(2, 10);
+
   (req as any).__rid = rid;
   (req as any).__start = now();
+
   console.log(`[${rid}] --> ${req.method} ${req.url}`);
+
   next();
+
 });
 
 app.use((req: Request, res: Response, next: NextFunction) => {
+
   res.on("finish", () => {
+
     const rid = (req as any).__rid;
     const start = (req as any).__start;
+
     console.log(
       `[${rid}] <-- ${req.method} ${req.url} ${res.statusCode} (${now() - start}ms)`
     );
+
   });
+
   next();
+
 });
 
 /* =======================
-   Routes
+   Root
 ======================= */
 
 app.get("/", (_req: Request, res: Response) => {
+
   res.type("text/plain").send("SommelierLab conv-runtime running");
+
 });
 
-/**
- * Healthcheck Railway-safe
- * ❗ NUNCA rompe el servicio
- */
+/* =======================
+   Healthcheck
+======================= */
+
 app.get("/health", async (_req: Request, res: Response) => {
+
   try {
+
     if (redis) {
-      // lazyConnect -> conectamos bajo demanda
+
       await redis.connect().catch(() => {});
       await redis.set("test:ping", "ok", "EX", 5).catch(() => {});
+
     }
 
     res.json({
+
       ok: true,
       redis: redis ? "available" : "disabled",
       ttl_seconds: SESSION_TTL_SECONDS,
+
       has_env: {
+
         REDIS_URL: !!REDIS_URL,
         N8N_CONTEXT_URL: !!N8N_CONTEXT_URL,
         N8N_CHAT_URL: !!N8N_CHAT_URL,
+
       },
+
     });
+
   } catch {
+
     res.json({ ok: true, redis: "degraded" });
+
   }
-   });
+
+});
+
 /* =======================
-   QR Resolver
+   QR Resolver (URL LARGA)
 ======================= */
 
 app.get("/qr/resolve", (req: Request, res: Response) => {
 
   const code = String(req.query.code || "");
-  const t = String(req.query.t || "2");
 
   if (!code) {
     return res.status(400).send("missing code");
   }
 
-  // ejemplo: Q2-v005-2021-botella-EH9G
   const parts = code.split("-");
 
   if (parts.length < 3) {
     return res.status(400).send("invalid code");
   }
 
-  const vino = parts[1].toUpperCase(); // V005
-  const anyada = parts[2];             // 2021
+  const vino = parts[1].toUpperCase();
+  const anyada = parts[2];
 
   const redirectUrl =
     `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
@@ -208,29 +245,43 @@ app.get("/qr/resolve", (req: Request, res: Response) => {
   res.redirect(302, redirectUrl);
 
 });
-   app.get("/qr/resolve", (req, res) => {
 
-  const code = String(req.query.code || "");
-  const t = String(req.query.t || "2");
+/* =======================
+   QR Resolver (URL CORTA)
+   qr.sommelierlab.com/T4OO
+======================= */
 
-  if (!code) {
-    return res.status(400).send("missing code");
+app.get("/:code", (req: Request, res: Response, next: NextFunction) => {
+
+  const code = req.params.code;
+
+  // evitar conflicto con otras rutas
+  if (
+    code === "health" ||
+    code === "session" ||
+    code === "chat" ||
+    code === "debug"
+  ) {
+    return next();
   }
 
-  // ejemplo: Q2-v005-2021-botella-EH9G
+  // formato esperado
+  // Q2-v005-2021-botella-T4OO
+
   const parts = code.split("-");
 
   if (parts.length < 3) {
     return res.status(400).send("invalid code");
   }
 
-  const vino = parts[1].toUpperCase();   // V005
-  const anyada = parts[2];               // 2021
+  const vino = parts[1].toUpperCase();
+  const anyada = parts[2];
 
   const redirectUrl =
     `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
 
   res.redirect(302, redirectUrl);
+
 });
 
 /* =======================
@@ -238,13 +289,17 @@ app.get("/qr/resolve", (req: Request, res: Response) => {
 ======================= */
 
 app.post("/session/init", async (req: Request, res: Response) => {
+
   try {
+
     if (!redis) throw new Error("Redis not available");
-    await redis.connect().catch(() => {}); // asegura conexión
+
+    await redis.connect().catch(() => {});
 
     const session_id = assertString("session_id", req.body.session_id);
     const vino_id = assertString("vino_id", req.body.vino_id);
     const anyada = assertString("anyada", req.body.anyada);
+
     const lang = String(req.body.lang ?? "es").toLowerCase();
     const tenant_id = String(req.body.tenant_id ?? "default");
 
@@ -264,10 +319,12 @@ app.post("/session/init", async (req: Request, res: Response) => {
     }
 
     const state: SessionState = {
+
       agent_context: ctxResp.agent_context,
       history: [],
       created_at: now(),
       updated_at: now(),
+
     };
 
     await redis.set(
@@ -278,16 +335,22 @@ app.post("/session/init", async (req: Request, res: Response) => {
     );
 
     res.json({
+
       ok: true,
       session_id,
       ttl_seconds: SESSION_TTL_SECONDS,
       language: state.agent_context.language,
       tenant: state.agent_context.tenant?.tenant_id,
       wine_name: state.agent_context.wine?.identidad?.nombre ?? null,
+
     });
+
   } catch (e: any) {
+
     res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+
   }
+
 });
 
 /* =======================
@@ -295,14 +358,18 @@ app.post("/session/init", async (req: Request, res: Response) => {
 ======================= */
 
 app.post("/chat", async (req: Request, res: Response) => {
+
   try {
+
     if (!redis) throw new Error("Redis not available");
-    await redis.connect().catch(() => {}); // asegura conexión
+
+    await redis.connect().catch(() => {});
 
     const session_id = assertString("session_id", req.body.session_id);
     const userText = assertString("userText", req.body.userText);
 
     const raw = await redis.get(sessionKey(session_id));
+
     if (!raw) {
       return res.status(404).json({ ok: false, error: "session not found" });
     }
@@ -310,9 +377,10 @@ app.post("/chat", async (req: Request, res: Response) => {
     const state = JSON.parse(raw) as SessionState;
 
     const history: HistoryItem[] = [
+
       ...(state.history ?? []),
-      // ✅ FIX TS2322: literal narrow
-      { role: "user" as Role, text: userText, ts: now() },
+      { role: "user", text: userText, ts: now() },
+
     ];
 
     const chatResp = await httpPostJson<{ ok: boolean; text: string }>(
@@ -332,13 +400,18 @@ app.post("/chat", async (req: Request, res: Response) => {
     const assistantText = chatResp.text.trim();
 
     const nextState: SessionState = {
+
       ...state,
+
       history: [
+
         ...history,
-        // ✅ FIX TS2322: literal narrow
-        { role: "assistant" as Role, text: assistantText, ts: now() },
+        { role: "assistant", text: assistantText, ts: now() },
+
       ].slice(-30),
+
       updated_at: now(),
+
     };
 
     await redis.set(
@@ -349,14 +422,20 @@ app.post("/chat", async (req: Request, res: Response) => {
     );
 
     res.json({
+
       ok: true,
       session_id,
       text: assistantText,
       history_len: nextState.history.length,
+
     });
+
   } catch (e: any) {
+
     res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+
   }
+
 });
 
 /* =======================
@@ -364,48 +443,67 @@ app.post("/chat", async (req: Request, res: Response) => {
 ======================= */
 
 app.get("/debug/session/:id", async (req: Request, res: Response) => {
+
   try {
+
     if (!redis) throw new Error("Redis not available");
-    await redis.connect().catch(() => {}); // asegura conexión
+
+    await redis.connect().catch(() => {});
 
     const token = String(req.query.token ?? "");
+
     if (DEBUG_TOKEN && token !== DEBUG_TOKEN) {
       return res.status(403).json({ ok: false, error: "forbidden" });
     }
 
     const key = sessionKey(req.params.id);
+
     const raw = await redis.get(key);
     const ttl = await redis.ttl(key);
 
     res.json({
+
       ok: true,
       exists: !!raw,
       ttl_seconds: ttl,
       state: raw ? JSON.parse(raw) : null,
+
     });
+
   } catch (e: any) {
+
     res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+
   }
+
 });
 
 /* =======================
-   Start / Shutdown
+   Start
 ======================= */
 
-/**
- * ⬅️ CRÍTICO PARA RAILWAY
- */
 const server = app.listen(PORT, "0.0.0.0", () => {
+
   console.log(`🚀 conv-runtime listening on ${PORT}`);
+
 });
 
+/* =======================
+   Shutdown
+======================= */
+
 process.on("SIGTERM", () => {
+
   console.log("SIGTERM received. Shutting down cleanly...");
+
   server.close(() => {
+
     if (redis) {
       redis.quit().finally(() => process.exit(0));
     } else {
       process.exit(0);
     }
+
   });
+
 });
