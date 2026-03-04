@@ -178,6 +178,36 @@ app.get("/health", async (_req: Request, res: Response) => {
   } catch {
     res.json({ ok: true, redis: "degraded" });
   }
+   });
+/* =======================
+   QR Resolver
+======================= */
+
+app.get("/qr/resolve", (req: Request, res: Response) => {
+
+  const code = String(req.query.code || "");
+  const t = String(req.query.t || "2");
+
+  if (!code) {
+    return res.status(400).send("missing code");
+  }
+
+  // ejemplo: Q2-v005-2021-botella-EH9G
+  const parts = code.split("-");
+
+  if (parts.length < 3) {
+    return res.status(400).send("invalid code");
+  }
+
+  const vino = parts[1].toUpperCase(); // V005
+  const anyada = parts[2];             // 2021
+
+  const redirectUrl =
+    `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+
+  res.redirect(302, redirectUrl);
+
+});
    app.get("/qr/resolve", (req, res) => {
 
   const code = String(req.query.code || "");
