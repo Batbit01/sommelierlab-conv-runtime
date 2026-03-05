@@ -257,14 +257,14 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = req.params.code;
 
   // evitar conflicto con otras rutas
-  if (
-    code === "health" ||
-    code === "session" ||
-    code === "chat" ||
-    code === "debug"
-  ) {
-    return next();
-  }
+ if (
+  code === "health" ||
+  code === "session" ||
+  code === "chat" ||
+  code === "debug"
+) {
+  return res.status(404).send("invalid QR");
+}
 
   // ejemplo esperado
   // Q2-v005-2021-botella-T4OO
