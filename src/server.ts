@@ -257,12 +257,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = req.params.code;
 
   // evitar conflicto con otras rutas
- if (
-  code === "health" ||
-  code === "session" ||
-  code === "chat" ||
-  code === "debug"
-) {
+if (!code.startsWith("Q")) {
   return res.status(404).send("invalid QR");
 }
 
