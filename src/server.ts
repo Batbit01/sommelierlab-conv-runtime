@@ -1,10 +1,11 @@
 // src/server.ts
+// SommelierLab conv-runtime — versión estable (QR resolver limpio + sin duplicados)
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import Redis from "ioredis";
 
-console.log("🔥 BOOT server.ts — runtime REAL — 2026-01-08");
+console.log("🔥 BOOT server.ts — conv-runtime — stable");
 
 /* =======================
    Tipos base
@@ -41,7 +42,6 @@ type SessionState = {
 ======================= */
 
 const app = express();
-
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
@@ -57,7 +57,6 @@ const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
 const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
 
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
-
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
 
 if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
@@ -68,7 +67,6 @@ if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
 ======================= */
 
 type RedisClient = InstanceType<typeof Redis>;
-
 let redis: RedisClient | null = null;
 
 if (REDIS_URL) {
@@ -85,10 +83,7 @@ if (REDIS_URL) {
   redis.on("ready", () => console.log("🟢 Redis ready"));
   redis.on("reconnecting", () => console.warn("🟡 Redis reconnecting"));
   redis.on("close", () => console.warn("🟠 Redis connection closed"));
-
-  redis.on("error", (err: Error) =>
-    console.error("🔴 Redis error:", err.message)
-  );
+  redis.on("error", (err: Error) => console.error("🔴 Redis error:", err.message));
 }
 
 /* =======================
@@ -99,9 +94,7 @@ const sessionKey = (id: string) => `sommelier:session:${id}`;
 const now = () => Date.now();
 
 function assertString(name: string, v: unknown): string {
-  if (!v || typeof v !== "string" || !v.trim()) {
-    throw new Error(`${name} missing`);
-  }
+  if (!v || typeof v !== "string" || !v.trim()) throw new Error(`${name} missing`);
   return v.trim();
 }
 
@@ -136,12 +129,10 @@ app.use((req: Request, res: Response, next: NextFunction) => {
   res.on("finish", () => {
     const rid = (req as any).__rid;
     const start = (req as any).__start;
-
     console.log(
       `[${rid}] <-- ${req.method} ${req.url} ${res.statusCode} (${now() - start}ms)`
     );
   });
-
   next();
 });
 
@@ -172,6 +163,7 @@ app.get("/health", async (_req: Request, res: Response) => {
         REDIS_URL: !!REDIS_URL,
         N8N_CONTEXT_URL: !!N8N_CONTEXT_URL,
         N8N_CHAT_URL: !!N8N_CHAT_URL,
+        N8N_QR_SCAN_URL: !!N8N_QR_SCAN_URL,
       },
     });
   } catch {
@@ -180,8 +172,8 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 /* =======================
-   QR Resolver (URL LARGA)
-   (lo mantenemos para compatibilidad)
+   QR Resolver (URL LARGA)  (compatibilidad)
+   /qr/resolve?code=Q2-v005-2021-botella-OO9E
 ======================= */
 
 app.get("/qr/resolve", (req: Request, res: Response) => {
@@ -195,46 +187,48 @@ app.get("/qr/resolve", (req: Request, res: Response) => {
   const anyada = parts[2];
 
   const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
-  res.redirect(302, redirectUrl);
+  return res.redirect(302, redirectUrl);
 });
 
 /* =======================
    QR Resolver (URL CORTA)
-   - Actualmente acepta formato largo:
-     /Q2-v005-2021-botella-OO9E
-   - Preparado para token ultracorto:
-     /OO9E  (requiere lookup; por ahora devuelve 404)
+   /Q2-v005-2021-botella-OO9E
+   (token ultracorto /OO9E lo haremos después con lookup)
 ======================= */
 
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = String(req.params.code || "").trim();
 
-  // No interferir con rutas existentes / futuras
-  if (!code || code === "health" || code === "session" || code === "chat" || code === "debug" || code === "qr") {
+  // No interferir con rutas reales
+  if (
+    !code ||
+    code === "health" ||
+    code === "session" ||
+    code === "chat" ||
+    code === "debug" ||
+    code === "qr"
+  ) {
     return next();
   }
 
-  let vino = "";
-  let anyada = "";
-
-  // Caso 1: formato largo actual (empieza por Q2-...)
-  if (code.startsWith("Q")) {
-    const parts = code.split("-");
-    if (parts.length < 3) return res.status(400).send("invalid code");
-
-    vino = parts[1].toUpperCase();
-    anyada = parts[2];
-  } else {
-    // Caso 2: token ultracorto (OO9E)
-    // Aún no hacemos lookup en DB/n8n para no romper nada.
-    // En cuanto implementes DT_QR_CODES + qr-lookup, aquí se resolverá.
-    return res.status(404).send("token_lookup_not_configured");
+  // En esta fase aceptamos solo el formato largo que empieza por "Q"
+  if (!code.startsWith("Q")) {
+    return res.status(404).send("invalid QR");
   }
 
+  // Q2-v005-2021-botella-OO9E
+  const parts = code.split("-");
+  if (parts.length < 3) {
+    return res.status(400).send("invalid code");
+  }
+
+  const vino = parts[1].toUpperCase();
+  const anyada = parts[2];
+
+  // analytics (no bloqueante)
   const tenant_id = "B004"; // temporal
   const context = "bottle";
 
-  // analytics (no bloqueante)
   if (N8N_QR_SCAN_URL) {
     fetch(N8N_QR_SCAN_URL, {
       method: "POST",
@@ -246,9 +240,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
         tenant_id,
         context,
       }),
-    }).catch((err: any) => {
-      console.warn("QR analytics failed:", err?.message ?? String(err));
-    });
+    }).catch(() => {});
   }
 
   const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
@@ -282,9 +274,7 @@ app.post("/session/init", async (req: Request, res: Response) => {
       session_id,
     });
 
-    if (!ctxResp?.agent_context) {
-      throw new Error("n8n context missing agent_context");
-    }
+    if (!ctxResp?.agent_context) throw new Error("n8n context missing agent_context");
 
     const state: SessionState = {
       agent_context: ctxResp.agent_context,
@@ -293,12 +283,7 @@ app.post("/session/init", async (req: Request, res: Response) => {
       updated_at: now(),
     };
 
-    await redis.set(
-      sessionKey(session_id),
-      JSON.stringify(state),
-      "EX",
-      SESSION_TTL_SECONDS
-    );
+    await redis.set(sessionKey(session_id), JSON.stringify(state), "EX", SESSION_TTL_SECONDS);
 
     res.json({
       ok: true,
@@ -326,9 +311,7 @@ app.post("/chat", async (req: Request, res: Response) => {
     const userText = assertString("userText", req.body.userText);
 
     const raw = await redis.get(sessionKey(session_id));
-    if (!raw) {
-      return res.status(404).json({ ok: false, error: "session not found" });
-    }
+    if (!raw) return res.status(404).json({ ok: false, error: "session not found" });
 
     const state = JSON.parse(raw) as SessionState;
 
@@ -337,19 +320,14 @@ app.post("/chat", async (req: Request, res: Response) => {
       { role: "user", text: userText, ts: now() },
     ];
 
-    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(
-      N8N_CHAT_URL!,
-      {
-        session_id,
-        userText,
-        history,
-        agent_context: state.agent_context,
-      }
-    );
+    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
+      session_id,
+      userText,
+      history,
+      agent_context: state.agent_context,
+    });
 
-    if (!chatResp?.text) {
-      throw new Error("n8n chat missing text");
-    }
+    if (!chatResp?.text) throw new Error("n8n chat missing text");
 
     const assistantText = chatResp.text.trim();
 
@@ -359,12 +337,7 @@ app.post("/chat", async (req: Request, res: Response) => {
       updated_at: now(),
     };
 
-    await redis.set(
-      sessionKey(session_id),
-      JSON.stringify(nextState),
-      "EX",
-      SESSION_TTL_SECONDS
-    );
+    await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
     res.json({
       ok: true,
@@ -407,16 +380,12 @@ app.get("/debug/session/:id", async (req: Request, res: Response) => {
 });
 
 /* =======================
-   Start
+   Start + Shutdown
 ======================= */
 
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 conv-runtime listening on ${PORT}`);
 });
-
-/* =======================
-   Shutdown
-======================= */
 
 process.on("SIGTERM", () => {
   console.log("SIGTERM received. Shutting down cleanly...");
