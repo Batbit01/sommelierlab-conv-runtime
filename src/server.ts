@@ -149,23 +149,25 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 /* =======================
-   QR Resolver (Inteligente)
-   qr.sommelierlab.com/:code
+   QR Resolver (Corregido)
    ======================= */
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = req.params.code;
 
-  // Filtro de rutas reservadas
-  const reserved = ["health", "session", "chat", "debug", "qr", "favicon.ico"];
+  // 1. Filtro estricto: Solo rutas que son exactamente iguales a las reservadas
+  const reserved = ["health", "session", "chat", "debug", "favicon.ico"];
   if (reserved.includes(code)) return next();
+  
+  // Si el código es exactamente "qr" (sin nada más), también pasamos
+  if (code === "qr") return next();
 
   try {
     let vino_id: string = "";
     let anyada: string = "";
     let tenant_id: string = "B004";
 
-    // 1. Buscar token corto en Redis (ej: T4OO)
-    if (redis && code.length < 10) {
+    // 2. Buscar en Redis (Tokens cortos)
+    if (redis && code.length < 12) { // Ampliamos un poco el margen por si acaso
       const cached = await redis.get(`qr:token:${code}`);
       if (cached) {
         const data = JSON.parse(cached);
@@ -175,27 +177,18 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
       }
     }
 
-    // 2. Si no hay éxito, intentar parsear código largo (Q2-V001-2021...)
+    // 3. Parsear código largo (soporta Q2-..., qr-..., vino-...)
     if (!vino_id && code.includes("-")) {
       const parts = code.split("-");
+      // Buscamos la posición donde esté el vino (normalmente la segunda parte)
+      // Ejemplo: qr-v005-2021 -> parts[1] es v005, parts[2] es 2021
       if (parts.length >= 3) {
         vino_id = parts[1].toUpperCase();
         anyada = parts[2];
       }
     }
 
-    if (!vino_id) {
-      return res.status(404).send("Código QR no reconocido.");
-    }
 
-    // 3. Notificar a n8n (Analytics)
-    if (N8N_QR_SCAN_URL) {
-      fetch(N8N_QR_SCAN_URL, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ token: code, vino_id, anyada, tenant_id, ts: now() })
-      }).catch(err => console.error("QR Analytics Error:", err.message));
-    }
 
     // 4. Redirigir
     const redirectUrl = `https://sommelierlab.com/?vino_id=${vino_id}&anyada=${anyada}`;
