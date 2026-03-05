@@ -54,6 +54,7 @@ const PORT = Number(process.env.PORT || 8080);
 const REDIS_URL = process.env.REDIS_URL;
 const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
 const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
+const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
 
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
 
@@ -251,7 +252,60 @@ app.get("/qr/resolve", (req: Request, res: Response) => {
    qr.sommelierlab.com/T4OO
 ======================= */
 
-app.get("/:code", (req: Request, res: Response, next: NextFunction) => {
+app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
+
+  const code = req.params.code;
+
+  // evitar conflicto con otras rutas
+  if (
+    code === "health" ||
+    code === "session" ||
+    code === "chat" ||
+    code === "debug"
+  ) {
+    return next();
+  }
+
+  // ejemplo esperado
+  // Q2-v005-2021-botella-T4OO
+
+  const parts = code.split("-");
+
+  if (parts.length < 3) {
+    return res.status(400).send("invalid code");
+  }
+
+  const vino = parts[1].toUpperCase();
+  const anyada = parts[2];
+
+  const tenant_id = "B004"; // temporal (luego vendrá de DB)
+  const context = "bottle";
+
+  // enviar evento a n8n
+  if (N8N_QR_SCAN_URL) {
+    fetch(N8N_QR_SCAN_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        token: code,
+        vino_id: vino,
+        anyada: anyada,
+        tenant_id: tenant_id,
+        context: context
+      })
+    }).catch((err) => {
+      console.warn("QR analytics failed:", err.message);
+    });
+  }
+
+  const redirectUrl =
+    `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+
+  res.redirect(302, redirectUrl);
+
+});
 
   const code = req.params.code;
 
