@@ -1,13 +1,15 @@
 // src/server.ts
+
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import Redis from "ioredis";
 
-console.log("🔥 BOOT server.ts — runtime REAL — 2026-03-05");
+console.log("🔥 BOOT server.ts — runtime REAL — 2026-01-08");
 
 /* =======================
    Tipos base
-   ======================= */
+======================= */
+
 type Role = "user" | "assistant";
 
 type HistoryItem = {
@@ -35,30 +37,38 @@ type SessionState = {
 };
 
 /* =======================
-   App Config
-   ======================= */
+   App
+======================= */
+
 const app = express();
+
 app.use(cors());
 app.use(express.json({ limit: "1mb" }));
 
 /* =======================
-   ENV & Variables
-   ======================= */
+   ENV
+======================= */
+
 const PORT = Number(process.env.PORT || 8080);
+
 const REDIS_URL = process.env.REDIS_URL;
 const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
 const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
 const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
+
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
+
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
 
 if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
 if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
 
 /* =======================
-   Redis Connection
-   ======================= */
+   Redis
+======================= */
+
 type RedisClient = InstanceType<typeof Redis>;
+
 let redis: RedisClient | null = null;
 
 if (REDIS_URL) {
@@ -73,12 +83,18 @@ if (REDIS_URL) {
 
   redis.on("connect", () => console.log("🟢 Redis connected"));
   redis.on("ready", () => console.log("🟢 Redis ready"));
-  redis.on("error", (err: Error) => console.error("🔴 Redis error:", err.message));
+  redis.on("reconnecting", () => console.warn("🟡 Redis reconnecting"));
+  redis.on("close", () => console.warn("🟠 Redis connection closed"));
+
+  redis.on("error", (err: Error) =>
+    console.error("🔴 Redis error:", err.message)
+  );
 }
 
 /* =======================
    Utils
-   ======================= */
+======================= */
+
 const sessionKey = (id: string) => `sommelier:session:${id}`;
 const now = () => Date.now();
 
@@ -100,173 +116,315 @@ async function httpPostJson<T>(url: string, body: any): Promise<T> {
     const text = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} calling ${url}: ${text}`);
   }
+
   return (await res.json()) as T;
 }
 
 /* =======================
-   Middlewares (Logs)
-   ======================= */
-app.use((req: Request, res: Response, next: NextFunction) => {
+   Logs
+======================= */
+
+app.use((req: Request, _res: Response, next: NextFunction) => {
   const rid = Math.random().toString(16).slice(2, 10);
   (req as any).__rid = rid;
   (req as any).__start = now();
-
   console.log(`[${rid}] --> ${req.method} ${req.url}`);
+  next();
+});
 
+app.use((req: Request, res: Response, next: NextFunction) => {
   res.on("finish", () => {
+    const rid = (req as any).__rid;
     const start = (req as any).__start;
-    console.log(`[${rid}] <-- ${req.method} ${req.url} ${res.statusCode} (${now() - start}ms)`);
+
+    console.log(
+      `[${rid}] <-- ${req.method} ${req.url} ${res.statusCode} (${now() - start}ms)`
+    );
   });
+
   next();
 });
 
 /* =======================
-   Rutas Base
-   ======================= */
+   Root
+======================= */
+
 app.get("/", (_req: Request, res: Response) => {
   res.type("text/plain").send("SommelierLab conv-runtime running");
 });
 
+/* =======================
+   Healthcheck
+======================= */
+
 app.get("/health", async (_req: Request, res: Response) => {
   try {
-    let redisStatus = "disabled";
     if (redis) {
-      await redis.set("test:ping", "ok", "EX", 5);
-      redisStatus = "available";
+      await redis.connect().catch(() => {});
+      await redis.set("test:ping", "ok", "EX", 5).catch(() => {});
     }
+
     res.json({
       ok: true,
-      redis: redisStatus,
+      redis: redis ? "available" : "disabled",
+      ttl_seconds: SESSION_TTL_SECONDS,
       has_env: {
         REDIS_URL: !!REDIS_URL,
         N8N_CONTEXT_URL: !!N8N_CONTEXT_URL,
-        N8N_QR_SCAN_URL: !!N8N_QR_SCAN_URL
-      }
+        N8N_CHAT_URL: !!N8N_CHAT_URL,
+      },
     });
-  } catch (e) {
+  } catch {
     res.json({ ok: true, redis: "degraded" });
   }
 });
 
 /* =======================
-   QR Resolver (Corregido)
-   ======================= */
-app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
-  const code = req.params.code;
+   QR Resolver (URL LARGA)
+   (lo mantenemos para compatibilidad)
+======================= */
 
-  // 1. Filtro estricto: Solo rutas que son exactamente iguales a las reservadas
-  const reserved = ["health", "session", "chat", "debug", "favicon.ico"];
-  if (reserved.includes(code)) return next();
-  
-  // Si el código es exactamente "qr" (sin nada más), también pasamos
-  if (code === "qr") return next();
+app.get("/qr/resolve", (req: Request, res: Response) => {
+  const code = String(req.query.code || "");
+  if (!code) return res.status(400).send("missing code");
 
-  try {
-    let vino_id: string = "";
-    let anyada: string = "";
-    let tenant_id: string = "B004";
+  const parts = code.split("-");
+  if (parts.length < 3) return res.status(400).send("invalid code");
 
-    // 2. Buscar en Redis (Tokens cortos)
-    if (redis && code.length < 12) { // Ampliamos un poco el margen por si acaso
-      const cached = await redis.get(`qr:token:${code}`);
-      if (cached) {
-        const data = JSON.parse(cached);
-        vino_id = data.vino_id;
-        anyada = data.anyada;
-        tenant_id = data.tenant_id || tenant_id;
-      }
-    }
+  const vino = parts[1].toUpperCase();
+  const anyada = parts[2];
 
-    // 3. Parsear código largo (soporta Q2-..., qr-..., vino-...)
-    if (!vino_id && code.includes("-")) {
-      const parts = code.split("-");
-      // Buscamos la posición donde esté el vino (normalmente la segunda parte)
-      // Ejemplo: qr-v005-2021 -> parts[1] es v005, parts[2] es 2021
-      if (parts.length >= 3) {
-        vino_id = parts[1].toUpperCase();
-        anyada = parts[2];
-      }
-    }
-
-
-
-    // 4. Redirigir
-    const redirectUrl = `https://sommelierlab.com/?vino_id=${vino_id}&anyada=${anyada}`;
-    return res.redirect(302, redirectUrl);
-
-  } catch (e) {
-    console.error("QR Error:", e);
-    return res.status(500).send("Internal Error");
-  }
+  const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+  res.redirect(302, redirectUrl);
 });
 
 /* =======================
-   Session & Chat
-   ======================= */
+   QR Resolver (URL CORTA)
+   - Actualmente acepta formato largo:
+     /Q2-v005-2021-botella-OO9E
+   - Preparado para token ultracorto:
+     /OO9E  (requiere lookup; por ahora devuelve 404)
+======================= */
+
+app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
+  const code = String(req.params.code || "").trim();
+
+  // No interferir con rutas existentes / futuras
+  if (!code || code === "health" || code === "session" || code === "chat" || code === "debug" || code === "qr") {
+    return next();
+  }
+
+  let vino = "";
+  let anyada = "";
+
+  // Caso 1: formato largo actual (empieza por Q2-...)
+  if (code.startsWith("Q")) {
+    const parts = code.split("-");
+    if (parts.length < 3) return res.status(400).send("invalid code");
+
+    vino = parts[1].toUpperCase();
+    anyada = parts[2];
+  } else {
+    // Caso 2: token ultracorto (OO9E)
+    // Aún no hacemos lookup en DB/n8n para no romper nada.
+    // En cuanto implementes DT_QR_CODES + qr-lookup, aquí se resolverá.
+    return res.status(404).send("token_lookup_not_configured");
+  }
+
+  const tenant_id = "B004"; // temporal
+  const context = "bottle";
+
+  // analytics (no bloqueante)
+  if (N8N_QR_SCAN_URL) {
+    fetch(N8N_QR_SCAN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        token: code,
+        vino_id: vino,
+        anyada,
+        tenant_id,
+        context,
+      }),
+    }).catch((err: any) => {
+      console.warn("QR analytics failed:", err?.message ?? String(err));
+    });
+  }
+
+  const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+  return res.redirect(302, redirectUrl);
+});
+
+/* =======================
+   Session init
+======================= */
+
 app.post("/session/init", async (req: Request, res: Response) => {
   try {
     if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {});
+
     const session_id = assertString("session_id", req.body.session_id);
     const vino_id = assertString("vino_id", req.body.vino_id);
     const anyada = assertString("anyada", req.body.anyada);
 
-    const ctxResp = await httpPostJson<{ ok: boolean; agent_context: AgentContext }>(N8N_CONTEXT_URL!, {
-      vino_id, anyada, session_id,
-      lang: String(req.body.lang ?? "es"),
-      tenant_id: String(req.body.tenant_id ?? "default")
+    const lang = String(req.body.lang ?? "es").toLowerCase();
+    const tenant_id = String(req.body.tenant_id ?? "default");
+
+    const ctxResp = await httpPostJson<{
+      ok: boolean;
+      agent_context: AgentContext;
+    }>(N8N_CONTEXT_URL!, {
+      vino_id,
+      anyada,
+      lang,
+      tenant_id,
+      session_id,
     });
+
+    if (!ctxResp?.agent_context) {
+      throw new Error("n8n context missing agent_context");
+    }
 
     const state: SessionState = {
       agent_context: ctxResp.agent_context,
       history: [],
       created_at: now(),
-      updated_at: now()
+      updated_at: now(),
     };
 
-    await redis.set(sessionKey(session_id), JSON.stringify(state), "EX", SESSION_TTL_SECONDS);
-    res.json({ ok: true, session_id, wine_name: state.agent_context.wine?.identidad?.nombre });
-  } catch (e: any) {
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
+    await redis.set(
+      sessionKey(session_id),
+      JSON.stringify(state),
+      "EX",
+      SESSION_TTL_SECONDS
+    );
 
-app.post("/chat", async (req: Request, res: Response) => {
-  try {
-    if (!redis) throw new Error("Redis not available");
-    const session_id = assertString("session_id", req.body.session_id);
-    const userText = assertString("userText", req.body.userText);
-
-    const raw = await redis.get(sessionKey(session_id));
-    if (!raw) return res.status(404).json({ ok: false, error: "session not found" });
-
-    const state = JSON.parse(raw) as SessionState;
-    const history: HistoryItem[] = [...state.history, { role: "user", text: userText, ts: now() }];
-
-    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
-      session_id, userText, history, agent_context: state.agent_context
+    res.json({
+      ok: true,
+      session_id,
+      ttl_seconds: SESSION_TTL_SECONDS,
+      language: state.agent_context.language,
+      tenant: state.agent_context.tenant?.tenant_id,
+      wine_name: state.agent_context.wine?.identidad?.nombre ?? null,
     });
-
-    const assistantText = chatResp.text.trim();
-    state.history = [...history, { role: "assistant", text: assistantText, ts: now() }].slice(-30);
-    state.updated_at = now();
-
-    await redis.set(sessionKey(session_id), JSON.stringify(state), "EX", SESSION_TTL_SECONDS);
-    res.json({ ok: true, text: assistantText });
   } catch (e: any) {
-    res.status(400).json({ ok: false, error: e.message });
+    res.status(400).json({ ok: false, error: e?.message ?? String(e) });
   }
 });
 
 /* =======================
-   Start Server
-   ======================= */
+   Chat
+======================= */
+
+app.post("/chat", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {});
+
+    const session_id = assertString("session_id", req.body.session_id);
+    const userText = assertString("userText", req.body.userText);
+
+    const raw = await redis.get(sessionKey(session_id));
+    if (!raw) {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
+
+    const state = JSON.parse(raw) as SessionState;
+
+    const history: HistoryItem[] = [
+      ...(state.history ?? []),
+      { role: "user", text: userText, ts: now() },
+    ];
+
+    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(
+      N8N_CHAT_URL!,
+      {
+        session_id,
+        userText,
+        history,
+        agent_context: state.agent_context,
+      }
+    );
+
+    if (!chatResp?.text) {
+      throw new Error("n8n chat missing text");
+    }
+
+    const assistantText = chatResp.text.trim();
+
+    const nextState: SessionState = {
+      ...state,
+      history: [...history, { role: "assistant", text: assistantText, ts: now() }].slice(-30),
+      updated_at: now(),
+    };
+
+    await redis.set(
+      sessionKey(session_id),
+      JSON.stringify(nextState),
+      "EX",
+      SESSION_TTL_SECONDS
+    );
+
+    res.json({
+      ok: true,
+      session_id,
+      text: assistantText,
+      history_len: nextState.history.length,
+    });
+  } catch (e: any) {
+    res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/* =======================
+   Debug
+======================= */
+
+app.get("/debug/session/:id", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not available");
+    await redis.connect().catch(() => {});
+
+    const token = String(req.query.token ?? "");
+    if (DEBUG_TOKEN && token !== DEBUG_TOKEN) {
+      return res.status(403).json({ ok: false, error: "forbidden" });
+    }
+
+    const key = sessionKey(req.params.id);
+    const raw = await redis.get(key);
+    const ttl = await redis.ttl(key);
+
+    res.json({
+      ok: true,
+      exists: !!raw,
+      ttl_seconds: ttl,
+      state: raw ? JSON.parse(raw) : null,
+    });
+  } catch (e: any) {
+    res.status(500).json({ ok: false, error: e?.message ?? String(e) });
+  }
+});
+
+/* =======================
+   Start
+======================= */
+
 const server = app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 conv-runtime listening on ${PORT}`);
 });
 
+/* =======================
+   Shutdown
+======================= */
+
 process.on("SIGTERM", () => {
+  console.log("SIGTERM received. Shutting down cleanly...");
   server.close(() => {
-    if (redis) redis.quit().finally(() => process.exit(0));
-    else process.exit(0);
+    if (redis) {
+      redis.quit().finally(() => process.exit(0));
+    } else {
+      process.exit(0);
+    }
   });
 });
