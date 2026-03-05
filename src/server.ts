@@ -302,20 +302,14 @@ if (!code.startsWith("Q")) {
 
 });
 
+app.get("/:code", async (req: Request, res: Response) => {
+
   const code = req.params.code;
 
   // evitar conflicto con otras rutas
-  if (
-    code === "health" ||
-    code === "session" ||
-    code === "chat" ||
-    code === "debug"
-  ) {
-    return next();
+  if (!code.startsWith("Q")) {
+    return res.status(404).send("invalid QR");
   }
-
-  // formato esperado
-  // Q2-v005-2021-botella-T4OO
 
   const parts = code.split("-");
 
@@ -325,6 +319,27 @@ if (!code.startsWith("Q")) {
 
   const vino = parts[1].toUpperCase();
   const anyada = parts[2];
+
+  const tenant_id = "B004";
+  const context = "bottle";
+
+  if (N8N_QR_SCAN_URL) {
+    fetch(N8N_QR_SCAN_URL, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        token: code,
+        vino_id: vino,
+        anyada: anyada,
+        tenant_id: tenant_id,
+        context: context
+      })
+    }).catch((err) => {
+      console.warn("QR analytics failed:", err.message);
+    });
+  }
 
   const redirectUrl =
     `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
