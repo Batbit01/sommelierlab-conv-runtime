@@ -333,7 +333,7 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const nextState: SessionState = {
       ...state,
-      history: [...history, { role: "assistant", text: assistantText, ts: now() }].slice(-30),
+      history: [...history, { role: "assistant" as const, text: assistantText, ts: now() }].slice(-30),
       updated_at: now(),
     };
 
