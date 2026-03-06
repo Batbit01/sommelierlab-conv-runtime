@@ -37,6 +37,13 @@ type SessionState = {
   updated_at: number;
 };
 
+type QRLookupResponse = {
+  vino_id?: string;
+  anyada?: string;
+  tenant_id?: string;
+  context?: string;
+};
+
 /* =======================
    App
 ======================= */
@@ -55,6 +62,7 @@ const REDIS_URL = process.env.REDIS_URL;
 const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
 const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
 const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
+const N8N_QR_LOOKUP_URL = process.env.N8N_QR_LOOKUP_URL;
 
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
 const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
@@ -168,47 +176,43 @@ app.get("/health", async (_req: Request, res: Response) => {
 ======================= */
 
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
-
   const code = String(req.params.code || "").trim();
 
   if (!code || code === "health" || code === "session" || code === "chat" || code === "debug") {
     return next();
   }
 
-  /* -------------------------
-     TOKEN QR (ej: 7XK2)
-     lookup en n8n
-  --------------------------*/
-
   if (!code.startsWith("Q")) {
-
     try {
+      if (!N8N_QR_LOOKUP_URL) {
+        return res.status(500).send("QR lookup config missing");
+      }
 
-      const r = await fetch(
-        `${process.env.N8N_QR_LOOKUP_URL}?code=${code}`
-      );
+      const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
 
-      const data = await r.json();
-
-      if (!data.vino_id) {
+      if (!r.ok) {
         return res.status(404).send("invalid QR");
       }
 
-      const redirectUrl =
-        `https://sommelierlab.com/?vino_id=${data.vino_id}&anyada=${data.anyada}`;
+      const data = (await r.json()) as QRLookupResponse;
+
+      const vinoId = String(data?.vino_id || "").replace("=", "").trim();
+      const anyada = String(data?.anyada || "").replace("=", "").trim();
+
+      if (!vinoId || !anyada) {
+        return res.status(404).send("invalid QR");
+      }
+
+      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoId}&anyada=${anyada}`;
+
+      console.log("QR resolved:", code, "→", redirectUrl);
 
       return res.redirect(302, redirectUrl);
-
     } catch (e) {
+      console.error("QR lookup error:", e);
       return res.status(500).send("QR lookup error");
     }
-
   }
-
-  /* -------------------------
-     QR estructurado
-     Q-V005-2021-XXXX
-  --------------------------*/
 
   const parts = code.split("-");
 
@@ -220,7 +224,6 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const anyada = parts[2];
 
   if (process.env.N8N_QR_SCAN_URL) {
-
     fetch(process.env.N8N_QR_SCAN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -230,14 +233,11 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
         anyada,
       }),
     }).catch(() => {});
-
   }
 
-  const redirectUrl =
-    `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+  const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
 
   return res.redirect(302, redirectUrl);
-
 });
 
 /* =======================
@@ -259,7 +259,7 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const history: HistoryItem[] = [
       ...(state.history ?? []),
-      { role: "user" as const, text: userText, ts: now() },
+      { role: "user" as const, text: userText, ts: now() }
     ];
 
     const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
@@ -273,10 +273,11 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const nextState: SessionState = {
       ...state,
-      history: [...history, { role: "assistant" as const, text: assistantText, ts: now() }].slice(-30),
+    history: [...history, { role: "assistant" as const, text: assistantText, ts: now() }].slice(-30),
       updated_at: now(),
     };
-  await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
+
+    await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
     res.json({
       ok: true,
