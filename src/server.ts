@@ -1,11 +1,11 @@
 // src/server.ts
-// SommelierLab conv-runtime — versión estable (QR resolver limpio + sin duplicados)
+// SommelierLab conv-runtime — Versión corregida y revisada para producción
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import Redis from "ioredis";
 
-console.log("🔥 BOOT server.ts — conv-runtime — stable");
+console.log("🔥 BOOT server.ts — conv-runtime — stable/v2");
 
 /* =======================
    Tipos base
@@ -57,21 +57,18 @@ app.use(express.json({ limit: "1mb" }));
 ======================= */
 
 const PORT = Number(process.env.PORT || 8080);
-
 const REDIS_URL = process.env.REDIS_URL;
 const N8N_CONTEXT_URL = process.env.N8N_CONTEXT_URL;
 const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
 const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
 const N8N_QR_LOOKUP_URL = process.env.N8N_QR_LOOKUP_URL;
-
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
-const DEBUG_TOKEN = process.env.DEBUG_TOKEN ?? "";
 
 if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
 if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
 
 /* =======================
-   Redis
+   Redis (Configuración robusta)
 ======================= */
 
 type RedisClient = InstanceType<typeof Redis>;
@@ -80,17 +77,13 @@ let redis: RedisClient | null = null;
 if (REDIS_URL) {
   redis = new Redis(REDIS_URL, {
     lazyConnect: true,
-    enableReadyCheck: false,
-    maxRetriesPerRequest: 1,
+    connectTimeout: 2000,
+    maxRetriesPerRequest: 0, // No bloquear peticiones si Redis falla
     retryStrategy(times) {
-      return Math.min(times * 200, 2000);
+      return times > 3 ? null : Math.min(times * 500, 2000);
     },
   });
 
-  redis.on("connect", () => console.log("🟢 Redis connected"));
-  redis.on("ready", () => console.log("🟢 Redis ready"));
-  redis.on("reconnecting", () => console.warn("🟡 Redis reconnecting"));
-  redis.on("close", () => console.warn("🟠 Redis connection closed"));
   redis.on("error", (err: Error) => console.error("🔴 Redis error:", err.message));
 }
 
@@ -122,7 +115,7 @@ async function httpPostJson<T>(url: string, body: any): Promise<T> {
 }
 
 /* =======================
-   Logs
+   Logs Middleware
 ======================= */
 
 app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -143,111 +136,85 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 });
 
 /* =======================
-   Root
-======================= */
-
-app.get("/", (_req: Request, res: Response) => {
-  res.type("text/plain").send("SommelierLab conv-runtime running");
-});
-
-/* =======================
    Healthcheck
 ======================= */
 
 app.get("/health", async (_req: Request, res: Response) => {
   try {
     if (redis) {
-      await redis.connect().catch(() => {});
+      // Intentamos un ping rápido, si falla no matamos la respuesta
       await redis.set("test:ping", "ok", "EX", 5).catch(() => {});
     }
-
-    res.json({
-      ok: true,
-      redis: redis ? "available" : "disabled",
-      ttl_seconds: SESSION_TTL_SECONDS,
-    });
+    res.json({ ok: true, redis: redis ? "configured" : "off" });
   } catch {
-    res.json({ ok: true, redis: "degraded" });
+    res.json({ ok: true, status: "degraded" });
   }
 });
 
 /* =======================
-   QR Resolver
+   QR Resolver (Corregido)
 ======================= */
 
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = String(req.params.code || "").trim();
 
-  if (!code || code === "health" || code === "session" || code === "chat" || code === "debug") {
-    return next();
-  }
+  // Exclusiones
+  const reserved = ["health", "session", "chat", "debug", "favicon.ico"];
+  if (!code || reserved.includes(code)) return next();
 
+  // Caso A: Token corto (ej: 7XK2)
   if (!code.startsWith("Q")) {
     try {
-      if (!N8N_QR_LOOKUP_URL) {
-        return res.status(500).send("QR lookup config missing");
-      }
+      if (!N8N_QR_LOOKUP_URL) return res.status(500).send("QR Config Missing");
 
       const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
-
-      if (!r.ok) {
-        return res.status(404).send("invalid QR");
-      }
+      if (!r.ok) return res.status(404).send("invalid QR (n8n)");
 
       const data = (await r.json()) as QRLookupResponse;
 
-      const vinoId = String(data?.vino_id || "").replace("=", "").trim();
-      const anyada = String(data?.anyada || "").replace("=", "").trim();
+      // Limpieza de caracteres extra "=" que vienen de n8n
+      const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
+      const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
 
-      if (!vinoId || !anyada) {
-        return res.status(404).send("invalid QR");
+      if (!vinoId || vinoId === "undefined" || !anyada) {
+        return res.status(404).send("QR data incomplete");
       }
 
-      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoId}&anyada=${anyada}`;
-
-      console.log("QR resolved:", code, "→", redirectUrl);
-
+      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoId.toUpperCase()}&anyada=${anyada}`;
+      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
       return res.redirect(302, redirectUrl);
-    } catch (e) {
-      console.error("QR lookup error:", e);
-      return res.status(500).send("QR lookup error");
+
+    } catch (e: any) {
+      console.error("[QR] Error:", e.message);
+      return res.status(500).send("Resolver Error");
     }
   }
 
+  // Caso B: Formato largo (ej: Q-V001-2021)
   const parts = code.split("-");
-
-  if (parts.length < 3) {
-    return res.status(400).send("invalid code");
-  }
+  if (parts.length < 3) return res.status(400).send("invalid code format");
 
   const vino = parts[1].toUpperCase();
   const anyada = parts[2];
 
-  if (process.env.N8N_QR_SCAN_URL) {
-    fetch(process.env.N8N_QR_SCAN_URL, {
+  if (N8N_QR_SCAN_URL) {
+    fetch(N8N_QR_SCAN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        token: code,
-        vino_id: vino,
-        anyada,
-      }),
+      body: JSON.stringify({ token: code, vino_id: vino, anyada }),
     }).catch(() => {});
   }
 
-  const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
-
-  return res.redirect(302, redirectUrl);
+  return res.redirect(302, `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`);
 });
 
 /* =======================
-   Chat
+   Chat (Corregido para TypeScript)
 ======================= */
 
 app.post("/chat", async (req: Request, res: Response) => {
   try {
-    if (!redis) throw new Error("Redis not available");
-    await redis.connect().catch(() => {});
+    if (!redis) throw new Error("Redis not configured");
 
     const session_id = assertString("session_id", req.body.session_id);
     const userText = assertString("userText", req.body.userText);
@@ -271,9 +238,13 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const assistantText = chatResp.text.trim();
 
+    // AQUÍ LA CORRECCIÓN: Usamos 'as Role' para que TSC no se queje
     const nextState: SessionState = {
       ...state,
-    history: [...history, { role: "assistant" as const, text: assistantText, ts: now() }].slice(-30),
+      history: [
+        ...history, 
+        { role: "assistant" as Role, text: assistantText, ts: now() }
+      ].slice(-30),
       updated_at: now(),
     };
 
@@ -283,17 +254,21 @@ app.post("/chat", async (req: Request, res: Response) => {
       ok: true,
       session_id,
       text: assistantText,
-      history_len: nextState.history.length,
     });
   } catch (e: any) {
-    res.status(400).json({ ok: false, error: e?.message ?? String(e) });
+    console.error("[CHAT] Error:", e.message);
+    res.status(400).json({ ok: false, error: e?.message });
   }
 });
 
 /* =======================
-   Start
+   Main
 ======================= */
 
+app.get("/", (_req: Request, res: Response) => {
+  res.send("SommelierLab API v2");
+});
+
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 conv-runtime listening on ${PORT}`);
+  console.log(`🚀 Server ready on port ${PORT}`);
 });
