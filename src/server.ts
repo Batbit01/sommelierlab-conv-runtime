@@ -168,24 +168,60 @@ app.get("/health", async (_req: Request, res: Response) => {
 ======================= */
 
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
+
   const code = String(req.params.code || "").trim();
 
   if (!code || code === "health" || code === "session" || code === "chat" || code === "debug") {
     return next();
   }
 
+  /* -------------------------
+     TOKEN QR (ej: 7XK2)
+     lookup en n8n
+  --------------------------*/
+
   if (!code.startsWith("Q")) {
-    return res.status(404).send("invalid QR");
+
+    try {
+
+      const r = await fetch(
+        `${process.env.N8N_QR_LOOKUP_URL}?code=${code}`
+      );
+
+      const data = await r.json();
+
+      if (!data.vino_id) {
+        return res.status(404).send("invalid QR");
+      }
+
+      const redirectUrl =
+        `https://sommelierlab.com/?vino_id=${data.vino_id}&anyada=${data.anyada}`;
+
+      return res.redirect(302, redirectUrl);
+
+    } catch (e) {
+      return res.status(500).send("QR lookup error");
+    }
+
   }
 
+  /* -------------------------
+     QR estructurado
+     Q-V005-2021-XXXX
+  --------------------------*/
+
   const parts = code.split("-");
-  if (parts.length < 3) return res.status(400).send("invalid code");
+
+  if (parts.length < 3) {
+    return res.status(400).send("invalid code");
+  }
 
   const vino = parts[1].toUpperCase();
   const anyada = parts[2];
 
-  if (N8N_QR_SCAN_URL) {
-    fetch(N8N_QR_SCAN_URL, {
+  if (process.env.N8N_QR_SCAN_URL) {
+
+    fetch(process.env.N8N_QR_SCAN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -194,10 +230,14 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
         anyada,
       }),
     }).catch(() => {});
+
   }
 
-  const redirectUrl = `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+  const redirectUrl =
+    `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`;
+
   return res.redirect(302, redirectUrl);
+
 });
 
 /* =======================
@@ -236,8 +276,7 @@ app.post("/chat", async (req: Request, res: Response) => {
       history: [...history, { role: "assistant" as const, text: assistantText, ts: now() }].slice(-30),
       updated_at: now(),
     };
-
-    await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
+  await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
     res.json({
       ok: true,
