@@ -195,8 +195,8 @@ if (!code.startsWith("Q")) {
     // registrar escaneo (GET porque el webhook n8n está configurado como GET)
 
     if (N8N_QR_SCAN_URL) {
-      fetch(`${N8N_QR_SCAN_URL}?token=${code}&vino_id=${vinoIdUpper}&anyada=${anyada}`)
-        .catch(() => {});
+     await fetch(`${N8N_QR_SCAN_URL}?token=${code}&vino_id=${vinoIdUpper}&anyada=${anyada}`)
+  .catch(() => {});
     }
 
     return res.redirect(302, redirectUrl);
