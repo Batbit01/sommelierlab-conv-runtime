@@ -152,27 +152,31 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 /* =======================
-   QR Resolver (Corregido)
+   QR Resolver
 ======================= */
 
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = String(req.params.code || "").trim();
 
-  // Exclusiones
-  const reserved = ["health", "session", "chat", "debug", "favicon.ico"];
-  if (!code || reserved.includes(code)) return next();
+  if (!code || code === "health" || code === "session" || code === "chat" || code === "debug") {
+    return next();
+  }
 
   // Caso A: Token corto (ej: 7XK2)
   if (!code.startsWith("Q")) {
     try {
-      if (!N8N_QR_LOOKUP_URL) return res.status(500).send("QR Config Missing");
+      if (!N8N_QR_LOOKUP_URL) {
+        return res.status(500).send("QR Config Missing");
+      }
 
       const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
-      if (!r.ok) return res.status(404).send("invalid QR (n8n)");
+
+      if (!r.ok) {
+        return res.status(404).send("invalid QR (n8n)");
+      }
 
       const data = (await r.json()) as QRLookupResponse;
 
-      // Limpieza de caracteres extra "=" que vienen de n8n
       const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
       const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
 
@@ -180,19 +184,37 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
         return res.status(404).send("QR data incomplete");
       }
 
-      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoId.toUpperCase()}&anyada=${anyada}`;
-      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
-      return res.redirect(302, redirectUrl);
+      const vinoIdUpper = vinoId.toUpperCase();
+      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoIdUpper}&anyada=${anyada}`;
 
+      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
+
+      // registrar escaneo
+      if (N8N_QR_SCAN_URL) {
+        fetch(N8N_QR_SCAN_URL, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            token: code,
+            vino_id: vinoIdUpper,
+            anyada: anyada,
+          }),
+        }).catch(() => {});
+      }
+
+      return res.redirect(302, redirectUrl);
     } catch (e: any) {
-      console.error("[QR] Error:", e.message);
+      console.error("[QR] Error:", e?.message ?? String(e));
       return res.status(500).send("Resolver Error");
     }
   }
 
   // Caso B: Formato largo (ej: Q-V001-2021)
   const parts = code.split("-");
-  if (parts.length < 3) return res.status(400).send("invalid code format");
+
+  if (parts.length < 3) {
+    return res.status(400).send("invalid code format");
+  }
 
   const vino = parts[1].toUpperCase();
   const anyada = parts[2];
@@ -201,7 +223,11 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     fetch(N8N_QR_SCAN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token: code, vino_id: vino, anyada }),
+      body: JSON.stringify({
+        token: code,
+        vino_id: vino,
+        anyada: anyada,
+      }),
     }).catch(() => {});
   }
 
