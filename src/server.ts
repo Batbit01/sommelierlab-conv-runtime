@@ -162,52 +162,53 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  // Caso A: Token corto (ej: 7XK2)
-  if (!code.startsWith("Q")) {
-    try {
-      if (!N8N_QR_LOOKUP_URL) {
-        return res.status(500).send("QR Config Missing");
-      }
+ // Caso A: Token corto (ej: 7XK2)
 
-      const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
+if (!code.startsWith("Q")) {
 
-      if (!r.ok) {
-        return res.status(404).send("invalid QR (n8n)");
-      }
+  try {
 
-      const data = (await r.json()) as QRLookupResponse;
-
-      const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
-      const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
-
-      if (!vinoId || vinoId === "undefined" || !anyada) {
-        return res.status(404).send("QR data incomplete");
-      }
-
-      const vinoIdUpper = vinoId.toUpperCase();
-      const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoIdUpper}&anyada=${anyada}`;
-
-      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
-
-      // registrar escaneo
-      if (N8N_QR_SCAN_URL) {
-        fetch(N8N_QR_SCAN_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            token: code,
-            vino_id: vinoIdUpper,
-            anyada: anyada,
-          }),
-        }).catch(() => {});
-      }
-
-      return res.redirect(302, redirectUrl);
-    } catch (e: any) {
-      console.error("[QR] Error:", e?.message ?? String(e));
-      return res.status(500).send("Resolver Error");
+    if (!N8N_QR_LOOKUP_URL) {
+      return res.status(500).send("QR Config Missing");
     }
+
+    const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
+
+    if (!r.ok) {
+      return res.status(404).send("invalid QR (n8n)");
+    }
+
+    const data = (await r.json()) as QRLookupResponse;
+
+    const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
+    const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
+
+    if (!vinoId || vinoId === "undefined" || !anyada) {
+      return res.status(404).send("QR data incomplete");
+    }
+
+    const vinoIdUpper = vinoId.toUpperCase();
+    const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoIdUpper}&anyada=${anyada}`;
+
+    console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
+
+    // registrar escaneo (GET porque el webhook n8n está configurado como GET)
+
+    if (N8N_QR_SCAN_URL) {
+      fetch(`${N8N_QR_SCAN_URL}?token=${code}&vino_id=${vinoIdUpper}&anyada=${anyada}`)
+        .catch(() => {});
+    }
+
+    return res.redirect(302, redirectUrl);
+
+  } catch (e: any) {
+
+    console.error("[QR] Error:", e?.message ?? String(e));
+    return res.status(500).send("Resolver Error");
+
   }
+
+}
 
   // Caso B: Formato largo (ej: Q-V001-2021)
   const parts = code.split("-");
