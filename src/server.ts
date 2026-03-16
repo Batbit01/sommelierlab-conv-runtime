@@ -1,9 +1,11 @@
+
 // src/server.ts
 // SommelierLab conv-runtime — Versión corregida y revisada para producción
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
 import Redis from "ioredis";
+import pg from "pg";
 
 console.log("🔥 BOOT server.ts — conv-runtime — stable/v2");
 
@@ -63,9 +65,23 @@ const N8N_CHAT_URL = process.env.N8N_CHAT_URL;
 const N8N_QR_SCAN_URL = process.env.N8N_QR_SCAN_URL;
 const N8N_QR_LOOKUP_URL = process.env.N8N_QR_LOOKUP_URL;
 const SESSION_TTL_SECONDS = Number(process.env.SESSION_TTL_SECONDS ?? 1800);
+const ANALYTICS_DATABASE_URL = process.env.ANALYTICS_DATABASE_URL;
 
 if (!N8N_CONTEXT_URL) throw new Error("Missing N8N_CONTEXT_URL");
 if (!N8N_CHAT_URL) throw new Error("Missing N8N_CHAT_URL");
+
+/* =======================
+   Postgres analytics
+======================= */
+
+const { Pool } = pg;
+
+const analyticsDb = ANALYTICS_DATABASE_URL
+  ? new Pool({
+      connectionString: ANALYTICS_DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+    })
+  : null;
 
 /* =======================
    Redis (Configuración robusta)
@@ -78,7 +94,7 @@ if (REDIS_URL) {
   redis = new Redis(REDIS_URL, {
     lazyConnect: true,
     connectTimeout: 2000,
-    maxRetriesPerRequest: 0, // No bloquear peticiones si Redis falla
+    maxRetriesPerRequest: 0,
     retryStrategy(times) {
       return times > 3 ? null : Math.min(times * 500, 2000);
     },
@@ -95,7 +111,9 @@ const sessionKey = (id: string) => `sommelier:session:${id}`;
 const now = () => Date.now();
 
 function assertString(name: string, v: unknown): string {
-  if (!v || typeof v !== "string" || !v.trim()) throw new Error(`${name} missing`);
+  if (!v || typeof v !== "string" || !v.trim()) {
+    throw new Error(`${name} missing`);
+  }
   return v.trim();
 }
 
@@ -142,13 +160,105 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 app.get("/health", async (_req: Request, res: Response) => {
   try {
     if (redis) {
-      // Intentamos un ping rápido, si falla no matamos la respuesta
       await redis.set("test:ping", "ok", "EX", 5).catch(() => {});
     }
-    res.json({ ok: true, redis: redis ? "configured" : "off" });
+    res.json({
+      ok: true,
+      redis: redis ? "configured" : "off",
+      analytics_db: analyticsDb ? "configured" : "off",
+    });
   } catch {
     res.json({ ok: true, status: "degraded" });
   }
+});
+
+/* =======================
+   Debug DB
+======================= */
+
+app.get("/debug/db", async (_req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({
+        ok: false,
+        error: "ANALYTICS_DATABASE_URL not configured",
+      });
+    }
+
+    const result = await analyticsDb.query("SELECT NOW() as now");
+    return res.json({
+      ok: true,
+      now: result.rows[0]?.now ?? null,
+    });
+  } catch (e: any) {
+    console.error("[DB] Error:", e?.message ?? String(e));
+    return res.status(500).json({
+      ok: false,
+      error: e?.message ?? "db error",
+    });
+  }
+});
+
+/* =======================
+   Chat
+======================= */
+
+app.post("/chat", async (req: Request, res: Response) => {
+  try {
+    if (!redis) throw new Error("Redis not configured");
+
+    const session_id = assertString("session_id", req.body.session_id);
+    const userText = assertString("userText", req.body.userText);
+
+    const raw = await redis.get(sessionKey(session_id));
+    if (!raw) {
+      return res.status(404).json({ ok: false, error: "session not found" });
+    }
+
+    const state = JSON.parse(raw) as SessionState;
+
+    const history: HistoryItem[] = [
+      ...(state.history ?? []),
+      { role: "user", text: userText, ts: now() },
+    ];
+
+    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
+      session_id,
+      userText,
+      history,
+      agent_context: state.agent_context,
+    });
+
+    const assistantText = chatResp.text.trim();
+
+    const nextState: SessionState = {
+      ...state,
+      history: [
+        ...history,
+        { role: "assistant", text: assistantText, ts: now() },
+      ].slice(-30),
+      updated_at: now(),
+    };
+
+    await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
+
+    res.json({
+      ok: true,
+      session_id,
+      text: assistantText,
+    });
+  } catch (e: any) {
+    console.error("[CHAT] Error:", e?.message ?? String(e));
+    res.status(400).json({ ok: false, error: e?.message ?? "chat error" });
+  }
+});
+
+/* =======================
+   Root
+======================= */
+
+app.get("/", (_req: Request, res: Response) => {
+  res.send("SommelierLab API v2");
 });
 
 /* =======================
@@ -158,59 +268,59 @@ app.get("/health", async (_req: Request, res: Response) => {
 app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
   const code = String(req.params.code || "").trim();
 
-  if (!code || code === "health" || code === "session" || code === "chat" || code === "debug") {
+  if (
+    !code ||
+    code === "health" ||
+    code === "session" ||
+    code === "chat" ||
+    code === "debug" ||
+    code === "db" ||
+    code === "api"
+  ) {
     return next();
   }
 
- // Caso A: Token corto (ej: 7XK2)
+  // Caso A: token corto (ej: 7XK2)
+  if (!code.startsWith("Q")) {
+    try {
+      if (!N8N_QR_LOOKUP_URL) {
+        return res.status(500).send("QR Config Missing");
+      }
 
-if (!code.startsWith("Q")) {
+      const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${encodeURIComponent(code)}`);
 
-  try {
+      if (!r.ok) {
+        return res.status(404).send("invalid QR (n8n)");
+      }
 
-    if (!N8N_QR_LOOKUP_URL) {
-      return res.status(500).send("QR Config Missing");
+      const data = (await r.json()) as QRLookupResponse;
+
+      const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
+      const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
+
+      if (!vinoId || vinoId === "undefined" || !anyada) {
+        return res.status(404).send("QR data incomplete");
+      }
+
+      const vinoIdUpper = vinoId.toUpperCase();
+      const redirectUrl = `https://sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}`;
+
+      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
+
+      if (N8N_QR_SCAN_URL) {
+        await fetch(
+          `${N8N_QR_SCAN_URL}?token=${encodeURIComponent(code)}&vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}`
+        ).catch(() => {});
+      }
+
+      return res.redirect(302, redirectUrl);
+    } catch (e: any) {
+      console.error("[QR] Error:", e?.message ?? String(e));
+      return res.status(500).send("Resolver Error");
     }
-
-    const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${code}`);
-
-    if (!r.ok) {
-      return res.status(404).send("invalid QR (n8n)");
-    }
-
-    const data = (await r.json()) as QRLookupResponse;
-
-    const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
-    const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
-
-    if (!vinoId || vinoId === "undefined" || !anyada) {
-      return res.status(404).send("QR data incomplete");
-    }
-
-    const vinoIdUpper = vinoId.toUpperCase();
-    const redirectUrl = `https://sommelierlab.com/?vino_id=${vinoIdUpper}&anyada=${anyada}`;
-
-    console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
-
-    // registrar escaneo (GET porque el webhook n8n está configurado como GET)
-
-    if (N8N_QR_SCAN_URL) {
-     await fetch(`${N8N_QR_SCAN_URL}?token=${code}&vino_id=${vinoIdUpper}&anyada=${anyada}`)
-  .catch(() => {});
-    }
-
-    return res.redirect(302, redirectUrl);
-
-  } catch (e: any) {
-
-    console.error("[QR] Error:", e?.message ?? String(e));
-    return res.status(500).send("Resolver Error");
-
   }
 
-}
-
-  // Caso B: Formato largo (ej: Q-V001-2021)
+  // Caso B: formato largo (ej: Q-V001-2021)
   const parts = code.split("-");
 
   if (parts.length < 3) {
@@ -227,74 +337,20 @@ if (!code.startsWith("Q")) {
       body: JSON.stringify({
         token: code,
         vino_id: vino,
-        anyada: anyada,
+        anyada,
       }),
     }).catch(() => {});
   }
 
-  return res.redirect(302, `https://sommelierlab.com/?vino_id=${vino}&anyada=${anyada}`);
-});
-
-/* =======================
-   Chat (Corregido para TypeScript)
-======================= */
-
-app.post("/chat", async (req: Request, res: Response) => {
-  try {
-    if (!redis) throw new Error("Redis not configured");
-
-    const session_id = assertString("session_id", req.body.session_id);
-    const userText = assertString("userText", req.body.userText);
-
-    const raw = await redis.get(sessionKey(session_id));
-    if (!raw) return res.status(404).json({ ok: false, error: "session not found" });
-
-    const state = JSON.parse(raw) as SessionState;
-
-    const history: HistoryItem[] = [
-      ...(state.history ?? []),
-      { role: "user" as const, text: userText, ts: now() }
-    ];
-
-    const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
-      session_id,
-      userText,
-      history,
-      agent_context: state.agent_context,
-    });
-
-    const assistantText = chatResp.text.trim();
-
-    // AQUÍ LA CORRECCIÓN: Usamos 'as Role' para que TSC no se queje
-    const nextState: SessionState = {
-      ...state,
-      history: [
-        ...history, 
-        { role: "assistant" as Role, text: assistantText, ts: now() }
-      ].slice(-30),
-      updated_at: now(),
-    };
-
-    await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
-
-    res.json({
-      ok: true,
-      session_id,
-      text: assistantText,
-    });
-  } catch (e: any) {
-    console.error("[CHAT] Error:", e.message);
-    res.status(400).json({ ok: false, error: e?.message });
-  }
+  return res.redirect(
+    302,
+    `https://sommelierlab.com/?vino_id=${encodeURIComponent(vino)}&anyada=${encodeURIComponent(anyada)}`
+  );
 });
 
 /* =======================
    Main
 ======================= */
-
-app.get("/", (_req: Request, res: Response) => {
-  res.send("SommelierLab API v2");
-});
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Server ready on port ${PORT}`);
