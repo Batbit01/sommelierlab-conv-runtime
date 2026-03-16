@@ -218,9 +218,9 @@ app.post("/chat", async (req: Request, res: Response) => {
     const state = JSON.parse(raw) as SessionState;
 
     const history: HistoryItem[] = [
-      ...(state.history ?? []),
-      { role: "user", text: userText, ts: now() },
-    ];
+  ...(state.history ?? []),
+  { role: "user" as Role, text: userText, ts: now() },
+];
 
     const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
       session_id,
@@ -231,14 +231,14 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const assistantText = chatResp.text.trim();
 
-    const nextState: SessionState = {
-      ...state,
-      history: [
-        ...history,
-        { role: "assistant", text: assistantText, ts: now() },
-      ].slice(-30),
-      updated_at: now(),
-    };
+  const nextState: SessionState = {
+  ...state,
+  history: [
+    ...history,
+    { role: "assistant" as Role, text: assistantText, ts: now() },
+  ].slice(-30) as HistoryItem[],
+  updated_at: now(),
+};
 
     await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
