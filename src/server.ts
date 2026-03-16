@@ -134,6 +134,11 @@ async function httpPostJson<T>(url: string, body: any): Promise<T> {
 function normalizeDbValue(value: any): any {
   if (value === null || value === undefined) return value;
 
+  // mantener fechas como ISO string
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
   if (Array.isArray(value)) {
     return value.map(normalizeDbValue);
   }
@@ -149,10 +154,12 @@ function normalizeDbValue(value: any): any {
   if (typeof value === "string") {
     const trimmed = value.trim();
 
+    // entero
     if (/^-?\d+$/.test(trimmed)) {
       return Number.parseInt(trimmed, 10);
     }
 
+    // decimal
     if (/^-?\d+\.\d+$/.test(trimmed)) {
       return Number.parseFloat(trimmed);
     }
