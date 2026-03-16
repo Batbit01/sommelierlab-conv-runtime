@@ -1,4 +1,3 @@
-
 // src/server.ts
 // SommelierLab conv-runtime — Versión corregida y revisada para producción
 
@@ -200,6 +199,58 @@ app.get("/debug/db", async (_req: Request, res: Response) => {
 });
 
 /* =======================
+   Analytics Overview
+======================= */
+
+app.get("/api/analytics/overview", async (req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({
+        ok: false,
+        error: "ANALYTICS_DATABASE_URL not configured",
+      });
+    }
+
+    const tenant_id = String(req.query.tenant_id || "").trim();
+    const monthInput = String(req.query.month || "").trim();
+
+    if (!tenant_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_id is required",
+      });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(monthInput)
+      ? `${monthInput}-01`
+      : `${new Date().toISOString().slice(0, 7)}-01`;
+
+    const sql = `
+      SELECT *
+      FROM sommelierlab.analytics_overview_by_tenant_month
+      WHERE tenant_id = $1
+        AND month = date_trunc('month', $2::date)
+      LIMIT 1
+    `;
+
+    const result = await analyticsDb.query(sql, [tenant_id, month]);
+
+    return res.json({
+      ok: true,
+      tenant_id,
+      month,
+      item: result.rows[0] ?? null,
+    });
+  } catch (e: any) {
+    console.error("[ANALYTICS_OVERVIEW] Error:", e?.message ?? String(e));
+    return res.status(500).json({
+      ok: false,
+      error: e?.message ?? "analytics overview error",
+    });
+  }
+});
+
+/* =======================
    Chat
 ======================= */
 
@@ -218,9 +269,9 @@ app.post("/chat", async (req: Request, res: Response) => {
     const state = JSON.parse(raw) as SessionState;
 
     const history: HistoryItem[] = [
-  ...(state.history ?? []),
-  { role: "user" as Role, text: userText, ts: now() },
-];
+      ...(state.history ?? []),
+      { role: "user" as Role, text: userText, ts: now() },
+    ];
 
     const chatResp = await httpPostJson<{ ok: boolean; text: string }>(N8N_CHAT_URL!, {
       session_id,
@@ -231,14 +282,14 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     const assistantText = chatResp.text.trim();
 
-  const nextState: SessionState = {
-  ...state,
-  history: [
-    ...history,
-    { role: "assistant" as Role, text: assistantText, ts: now() },
-  ].slice(-30) as HistoryItem[],
-  updated_at: now(),
-};
+    const nextState: SessionState = {
+      ...state,
+      history: [
+        ...history,
+        { role: "assistant" as Role, text: assistantText, ts: now() },
+      ].slice(-30) as HistoryItem[],
+      updated_at: now(),
+    };
 
     await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
