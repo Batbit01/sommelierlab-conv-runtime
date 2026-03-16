@@ -250,6 +250,55 @@ app.get("/api/analytics/overview", async (req: Request, res: Response) => {
   }
 });
 
+
+app.get("/api/analytics/wines", async (req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({
+        ok: false,
+        error: "ANALYTICS_DATABASE_URL not configured",
+      });
+    }
+
+    const tenant_id = String(req.query.tenant_id || "").trim();
+    const monthInput = String(req.query.month || "").trim();
+
+    if (!tenant_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_id is required",
+      });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(monthInput)
+      ? `${monthInput}-01`
+      : `${new Date().toISOString().slice(0, 7)}-01`;
+
+    const sql = `
+      SELECT *
+      FROM sommelierlab.analytics_wine_usage_by_tenant_month
+      WHERE tenant_id = $1
+        AND month = date_trunc('month', $2::date)
+      ORDER BY vino_id ASC
+    `;
+
+    const result = await analyticsDb.query(sql, [tenant_id, month]);
+
+    return res.json({
+      ok: true,
+      tenant_id,
+      month,
+      items: result.rows,
+    });
+  } catch (e: any) {
+    console.error("[ANALYTICS_WINES] Error:", e?.message ?? String(e));
+    return res.status(500).json({
+      ok: false,
+      error: e?.message ?? "analytics wines error",
+    });
+  }
+});
+
 /* =======================
    Chat
 ======================= */
