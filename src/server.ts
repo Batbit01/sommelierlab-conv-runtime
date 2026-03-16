@@ -131,6 +131,36 @@ async function httpPostJson<T>(url: string, body: any): Promise<T> {
   return (await res.json()) as T;
 }
 
+function normalizeDbValue(value: any): any {
+  if (value === null || value === undefined) return value;
+
+  if (Array.isArray(value)) {
+    return value.map(normalizeDbValue);
+  }
+
+  if (typeof value === "object") {
+    const out: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value)) {
+      out[key] = normalizeDbValue(val);
+    }
+    return out;
+  }
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+
+    if (/^-?\d+$/.test(trimmed)) {
+      return Number.parseInt(trimmed, 10);
+    }
+
+    if (/^-?\d+\.\d+$/.test(trimmed)) {
+      return Number.parseFloat(trimmed);
+    }
+  }
+
+  return value;
+}
+
 /* =======================
    Logs Middleware
 ======================= */
@@ -235,12 +265,14 @@ app.get("/api/analytics/overview", async (req: Request, res: Response) => {
 
     const result = await analyticsDb.query(sql, [tenant_id, month]);
 
-    return res.json({
-      ok: true,
-      tenant_id,
-      month,
-      item: result.rows[0] ?? null,
-    });
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        item: result.rows[0] ?? null,
+      })
+    );
   } catch (e: any) {
     console.error("[ANALYTICS_OVERVIEW] Error:", e?.message ?? String(e));
     return res.status(500).json({
@@ -250,6 +282,9 @@ app.get("/api/analytics/overview", async (req: Request, res: Response) => {
   }
 });
 
+/* =======================
+   Analytics Wines
+======================= */
 
 app.get("/api/analytics/wines", async (req: Request, res: Response) => {
   try {
@@ -284,12 +319,14 @@ app.get("/api/analytics/wines", async (req: Request, res: Response) => {
 
     const result = await analyticsDb.query(sql, [tenant_id, month]);
 
-    return res.json({
-      ok: true,
-      tenant_id,
-      month,
-      items: result.rows,
-    });
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        items: result.rows,
+      })
+    );
   } catch (e: any) {
     console.error("[ANALYTICS_WINES] Error:", e?.message ?? String(e));
     return res.status(500).json({
@@ -298,7 +335,12 @@ app.get("/api/analytics/wines", async (req: Request, res: Response) => {
     });
   }
 });
- app.get("/api/analytics/billing", async (req: Request, res: Response) => {
+
+/* =======================
+   Analytics Billing
+======================= */
+
+app.get("/api/analytics/billing", async (req: Request, res: Response) => {
   try {
     if (!analyticsDb) {
       return res.status(500).json({
@@ -331,12 +373,14 @@ app.get("/api/analytics/wines", async (req: Request, res: Response) => {
 
     const result = await analyticsDb.query(sql, [tenant_id, month]);
 
-    return res.json({
-      ok: true,
-      tenant_id,
-      month,
-      item: result.rows[0] ?? null,
-    });
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        item: result.rows[0] ?? null,
+      })
+    );
   } catch (e: any) {
     console.error("[ANALYTICS_BILLING] Error:", e?.message ?? String(e));
     return res.status(500).json({
@@ -345,6 +389,7 @@ app.get("/api/analytics/wines", async (req: Request, res: Response) => {
     });
   }
 });
+
 /* =======================
    Chat
 ======================= */
