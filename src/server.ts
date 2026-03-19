@@ -134,7 +134,6 @@ async function httpPostJson<T>(url: string, body: any): Promise<T> {
 function normalizeDbValue(value: any): any {
   if (value === null || value === undefined) return value;
 
-  // mantener fechas como ISO string
   if (value instanceof Date) {
     return value.toISOString();
   }
@@ -154,12 +153,10 @@ function normalizeDbValue(value: any): any {
   if (typeof value === "string") {
     const trimmed = value.trim();
 
-    // entero
     if (/^-?\d+$/.test(trimmed)) {
       return Number.parseInt(trimmed, 10);
     }
 
-    // decimal
     if (/^-?\d+\.\d+$/.test(trimmed)) {
       return Number.parseFloat(trimmed);
     }
@@ -398,6 +395,163 @@ app.get("/api/analytics/billing", async (req: Request, res: Response) => {
 });
 
 /* =======================
+   Analytics CTA
+======================= */
+
+app.get("/api/analytics/cta", async (req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({
+        ok: false,
+        error: "ANALYTICS_DATABASE_URL not configured",
+      });
+    }
+
+    const tenant_id = String(req.query.tenant_id || "").trim();
+    const monthInput = String(req.query.month || "").trim();
+
+    if (!tenant_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_id is required",
+      });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(monthInput)
+      ? `${monthInput}-01`
+      : `${new Date().toISOString().slice(0, 7)}-01`;
+
+    const sql = `
+      WITH scoped AS (
+        SELECT *
+        FROM sommelierlab.events
+        WHERE tenant_id = $1
+          AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
+      )
+      SELECT
+        $1::text AS tenant_id,
+        date_trunc('month', $2::date)::date AS month,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click') AS cta_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'reservar_visita') AS reservar_visita_click_count,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE event_type = 'page_view') > 0
+          THEN ROUND(
+            (COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar'))::numeric
+            / (COUNT(*) FILTER (WHERE event_type = 'page_view')),
+            4
+          )
+          ELSE 0
+        END AS page_to_buy_rate,
+        CASE
+          WHEN COUNT(*) FILTER (WHERE event_type = 'page_view') > 0
+          THEN ROUND(
+            (COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo'))::numeric
+            / (COUNT(*) FILTER (WHERE event_type = 'page_view')),
+            4
+          )
+          ELSE 0
+        END AS page_to_enoturismo_rate
+      FROM scoped
+    `;
+
+    const result = await analyticsDb.query(sql, [tenant_id, month]);
+
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        item: result.rows[0] ?? null,
+      })
+    );
+  } catch (e: any) {
+    console.error("[ANALYTICS_CTA] Error:", e?.message ?? String(e));
+    return res.status(500).json({
+      ok: false,
+      error: e?.message ?? "analytics cta error",
+    });
+  }
+});
+
+/* =======================
+   Analytics Geo/Lang
+======================= */
+
+app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({
+        ok: false,
+        error: "ANALYTICS_DATABASE_URL not configured",
+      });
+    }
+
+    const tenant_id = String(req.query.tenant_id || "").trim();
+    const monthInput = String(req.query.month || "").trim();
+
+    if (!tenant_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "tenant_id is required",
+      });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(monthInput)
+      ? `${monthInput}-01`
+      : `${new Date().toISOString().slice(0, 7)}-01`;
+
+    const byCountrySql = `
+      SELECT
+        COALESCE(geo_country, 'unknown') AS geo_country,
+        COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
+      FROM sommelierlab.events
+      WHERE tenant_id = $1
+        AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
+      GROUP BY COALESCE(geo_country, 'unknown')
+      ORDER BY page_view_count DESC, buy_click_count DESC
+    `;
+
+    const byLangSql = `
+      SELECT
+        COALESCE(lang, 'unknown') AS lang,
+        COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
+      FROM sommelierlab.events
+      WHERE tenant_id = $1
+        AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
+      GROUP BY COALESCE(lang, 'unknown')
+      ORDER BY page_view_count DESC, buy_click_count DESC
+    `;
+
+    const [byCountryResult, byLangResult] = await Promise.all([
+      analyticsDb.query(byCountrySql, [tenant_id, month]),
+      analyticsDb.query(byLangSql, [tenant_id, month]),
+    ]);
+
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        by_country: byCountryResult.rows,
+        by_lang: byLangResult.rows,
+      })
+    );
+  } catch (e: any) {
+    console.error("[ANALYTICS_GEO_LANG] Error:", e?.message ?? String(e));
+    return res.status(500).json({
+      ok: false,
+      error: e?.message ?? "analytics geo-lang error",
+    });
+  }
+});
+
+/* =======================
    Chat
 ======================= */
 
@@ -478,7 +632,6 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
-  // Caso A: token corto (ej: 7XK2)
   if (!code.startsWith("Q")) {
     try {
       if (!N8N_QR_LOOKUP_URL) {
@@ -518,7 +671,6 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     }
   }
 
-  // Caso B: formato largo (ej: Q-V001-2021)
   const parts = code.split("-");
 
   if (parts.length < 3) {
