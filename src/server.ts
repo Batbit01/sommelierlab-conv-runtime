@@ -424,7 +424,7 @@ app.get("/api/analytics/cta", async (req: Request, res: Response) => {
     const sql = `
       WITH scoped AS (
         SELECT *
-        FROM sommelierlab.events
+       FROM public.events
         WHERE tenant_id = $1
           AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       )
@@ -508,7 +508,7 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
-      FROM sommelierlab.events
+      FROM public.events
       WHERE tenant_id = $1
         AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       GROUP BY COALESCE(geo_country, 'unknown')
@@ -521,7 +521,7 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
-      FROM sommelierlab.events
+      FROM public.events
       WHERE tenant_id = $1
         AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       GROUP BY COALESCE(lang, 'unknown')
