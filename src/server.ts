@@ -43,6 +43,7 @@ type QRLookupResponse = {
   anyada?: string;
   tenant_id?: string;
   context?: string;
+  sub_context?: string;
 };
 
 /* =======================
@@ -648,19 +649,23 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
 
       const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
       const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
+      const ctx = String(data?.context || "").replace(/[="]/g, "").trim();
+      const subCtx = String(data?.sub_context || "").replace(/[="]/g, "").trim();
 
       if (!vinoId || vinoId === "undefined" || !anyada) {
         return res.status(404).send("QR data incomplete");
       }
 
       const vinoIdUpper = vinoId.toUpperCase();
-      const redirectUrl = `https://sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}`;
+      const contextTag = subCtx ? `${ctx}-${subCtx}` : ctx;
+      const ctxParam = contextTag ? `&ctx=${encodeURIComponent(contextTag)}` : "";
+      const redirectUrl = `https://sommelierlab-qr2-vite.vercel.app/${encodeURIComponent(vinoIdUpper)}/${encodeURIComponent(anyada)}?token=${encodeURIComponent(code)}${ctxParam}`;
 
       console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
 
       if (N8N_QR_SCAN_URL) {
         await fetch(
-          `${N8N_QR_SCAN_URL}?token=${encodeURIComponent(code)}&vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}`
+          `${N8N_QR_SCAN_URL}?token=${encodeURIComponent(code)}&vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&context=${encodeURIComponent(contextTag)}&sub_context=${encodeURIComponent(subCtx)}`
         ).catch(() => {});
       }
 
@@ -694,7 +699,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
 
   return res.redirect(
     302,
-    `https://sommelierlab.com/?vino_id=${encodeURIComponent(vino)}&anyada=${encodeURIComponent(anyada)}`
+    `https://sommelierlab-qr2-vite.vercel.app/${encodeURIComponent(vino)}/${encodeURIComponent(anyada)}?token=${encodeURIComponent(code)}`
   );
 });
 
