@@ -553,6 +553,59 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
 });
 
 /* =======================
+   Analytics Context
+======================= */
+
+app.get("/api/analytics/context", async (req: Request, res: Response) => {
+  try {
+    if (!analyticsDb) {
+      return res.status(500).json({ ok: false, error: "ANALYTICS_DATABASE_URL not configured" });
+    }
+
+    const tenant_id = String(req.query.tenant_id || "").trim();
+    const monthInput = String(req.query.month || "").trim();
+
+    if (!tenant_id) {
+      return res.status(400).json({ ok: false, error: "tenant_id is required" });
+    }
+
+    const month = /^\d{4}-\d{2}$/.test(monthInput)
+      ? `${monthInput}-01`
+      : `${new Date().toISOString().slice(0, 7)}-01`;
+
+    const sql = `
+      SELECT
+        COALESCE(context, 'unknown') AS context,
+        COALESCE(sub_context, '') AS sub_context,
+        COUNT(*) FILTER (WHERE event_type = 'qr_scan') AS qr_scan_count,
+        COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
+        COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
+        COUNT(*) FILTER (WHERE event_type = 'sommelier_open') AS sommelier_open_count,
+        COUNT(*) FILTER (WHERE event_type = 'play_audio') AS play_audio_count
+      FROM public.events
+      WHERE tenant_id = $1
+        AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
+      GROUP BY COALESCE(context, 'unknown'), COALESCE(sub_context, '')
+      ORDER BY qr_scan_count DESC, page_view_count DESC
+    `;
+
+    const result = await analyticsDb.query(sql, [tenant_id, month]);
+
+    return res.json(
+      normalizeDbValue({
+        ok: true,
+        tenant_id,
+        month,
+        by_context: result.rows,
+      })
+    );
+  } catch (e: any) {
+    console.error("[ANALYTICS_CONTEXT] Error:", e?.message ?? String(e));
+    return res.status(500).json({ ok: false, error: e?.message ?? "analytics context error" });
+  }
+});
+
+/* =======================
    Chat
 ======================= */
 
