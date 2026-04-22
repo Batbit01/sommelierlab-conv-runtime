@@ -712,7 +712,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
       const vinoIdUpper = vinoId.toUpperCase();
       const contextTag = subCtx ? `${ctx}-${subCtx}` : ctx;
       const ctxParam = contextTag ? `&ctx=${encodeURIComponent(contextTag)}` : "";
-      const redirectUrl = `https://www.sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}${ctxParam}`;
+      const redirectUrl = `https://qr2.sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}${ctxParam}`;
 
       console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
 
@@ -752,7 +752,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
 
   return res.redirect(
     302,
-    `https://www.sommelierlab.com/?vino_id=${encodeURIComponent(vino)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}`
+    `https://qr2.sommelierlab.com/?vino_id=${encodeURIComponent(vino)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}`
   );
 });
 
