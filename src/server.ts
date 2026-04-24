@@ -740,22 +740,36 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
 
   if (!code.startsWith("Q")) {
     try {
-      if (!N8N_QR_LOOKUP_URL) {
-        return res.status(503).send("QR lookup not configured");
+      // Lookup directo en Postgres (sommelierlab.qr_tokens). Antes se hacía
+      // un fetch a n8n que era un SPOF: si n8n caía o iba lento, ningún QR
+      // del mundo funcionaba. La query directa sobre índice por token
+      // es ~100x más rápida y elimina la dependencia del webhook externo.
+      if (!analyticsDb) {
+        return res.status(503).send("database not configured");
       }
 
-      const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${encodeURIComponent(code)}`);
+      const { rows } = await analyticsDb.query<{
+        vino_id: string;
+        anyada: string;
+        context: string | null;
+        sub_context: string | null;
+      }>(
+        `SELECT vino_id, anyada, context, sub_context
+           FROM sommelierlab.qr_tokens
+          WHERE token = $1
+          LIMIT 1`,
+        [code]
+      );
 
-      if (!r.ok) {
+      if (rows.length === 0) {
         return res.status(404).send("invalid QR");
       }
 
-      const data = (await r.json()) as QRLookupResponse;
-
-      const vinoId = String(data?.vino_id || "").replace(/[="]/g, "").trim();
-      const anyada = String(data?.anyada || "").replace(/[="]/g, "").trim();
-      const ctx = String(data?.context || "").replace(/[="]/g, "").trim();
-      const subCtx = String(data?.sub_context || "").replace(/[="]/g, "").trim();
+      const row = rows[0];
+      const vinoId = String(row.vino_id || "").replace(/[="]/g, "").trim();
+      const anyada = String(row.anyada || "").replace(/[="]/g, "").trim();
+      const ctx = String(row.context || "").replace(/[="]/g, "").trim();
+      const subCtx = String(row.sub_context || "").replace(/[="]/g, "").trim();
 
       if (!vinoId || vinoId === "undefined" || !anyada) {
         return res.status(404).send("QR data incomplete");
@@ -766,11 +780,13 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
       const ctxParam = contextTag ? `&ctx=${encodeURIComponent(contextTag)}` : "";
       const redirectUrl = `https://qr2.sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}${ctxParam}`;
 
-      // Token parcialmente redactado: evita dejar tokens completos en Railway logs.
       console.log(`[QR] Resolved ${redactToken(code)} -> vino=${vinoIdUpper} anyada=${anyada}`);
 
+      // Registro de scan a n8n: fire-and-forget, NO bloquea la redirección.
+      // Si n8n está caído, el usuario ve igualmente su vino — solo se pierde
+      // ese scan de métricas (recuperable luego desde logs si hiciera falta).
       if (N8N_QR_SCAN_URL) {
-        await fetch(
+        fetch(
           `${N8N_QR_SCAN_URL}?token=${encodeURIComponent(code)}&vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&context=${encodeURIComponent(contextTag)}&sub_context=${encodeURIComponent(subCtx)}`
         ).catch(() => {});
       }
