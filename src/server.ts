@@ -3,10 +3,19 @@
 
 import express, { Request, Response, NextFunction } from "express";
 import cors from "cors";
+import helmet from "helmet";
 import Redis from "ioredis";
 import pg from "pg";
+import { z } from "zod";
+import {
+  requireSecret,
+  rateLimitRedis,
+  makeCorsOrigin,
+  sanitizeError,
+  redactToken,
+} from "./security.js";
 
-console.log("🔥 BOOT server.ts — conv-runtime — stable/v2");
+console.log("🔥 BOOT server.ts — conv-runtime — stable/v3 (hardened)");
 
 /* =======================
    Tipos base
@@ -51,8 +60,37 @@ type QRLookupResponse = {
 ======================= */
 
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+// Confía en el proxy de Railway (X-Forwarded-For real, HTTPS real).
+app.set("trust proxy", 1);
+
+// Security headers equivalentes a los del dashboard/QR2.
+app.use(
+  helmet({
+    contentSecurityPolicy: false, // endpoints JSON, no servimos HTML propio
+    crossOriginEmbedderPolicy: false,
+  })
+);
+
+// CORS con whitelist. ALLOWED_ORIGINS en env, CSV.
+// Incluye por defecto los dominios propios si no está configurado.
+const DEFAULT_ORIGINS = [
+  "https://qr2.sommelierlab.com",
+  "https://sommelierlab-dashboard.vercel.app",
+  "https://sommelierlab-qr2-vite.vercel.app",
+  "https://www.sommelierlab.com",
+  "https://sommelierlab.com",
+].join(",");
+app.use(
+  cors({
+    origin: makeCorsOrigin(process.env.ALLOWED_ORIGINS || DEFAULT_ORIGINS),
+    credentials: false,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-api-key"],
+  })
+);
+
+// Body limit bajado a 64KB: /chat es texto corto, /analytics solo query params.
+app.use(express.json({ limit: "64kb" }));
 
 /* =======================
    ENV
@@ -207,31 +245,27 @@ app.get("/health", async (_req: Request, res: Response) => {
 });
 
 /* =======================
-   Debug DB
+   Debug DB (protegido)
 ======================= */
 
-app.get("/debug/db", async (_req: Request, res: Response) => {
+app.get("/debug/db", requireSecret("ANALYTICS_API_KEY"), async (_req: Request, res: Response) => {
   try {
     if (!analyticsDb) {
-      return res.status(500).json({
-        ok: false,
-        error: "ANALYTICS_DATABASE_URL not configured",
-      });
+      return res.status(503).json({ ok: false, error: "analytics_db_off" });
     }
-
     const result = await analyticsDb.query("SELECT NOW() as now");
-    return res.json({
-      ok: true,
-      now: result.rows[0]?.now ?? null,
-    });
-  } catch (e: any) {
-    console.error("[DB] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "db error",
-    });
+    return res.json({ ok: true, now: result.rows[0]?.now ?? null });
+  } catch (e) {
+    return sanitizeError("DB", e, 500, res);
   }
 });
+
+/* =======================
+   Guard para todo /api/analytics/*
+   Comparte el mismo ANALYTICS_API_KEY.
+======================= */
+
+app.use("/api/analytics", requireSecret("ANALYTICS_API_KEY"));
 
 /* =======================
    Analytics Overview
@@ -278,12 +312,8 @@ app.get("/api/analytics/overview", async (req: Request, res: Response) => {
         item: result.rows[0] ?? null,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_OVERVIEW] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "analytics overview error",
-    });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_OVERVIEW", e, 500, res);
   }
 });
 
@@ -332,12 +362,8 @@ app.get("/api/analytics/wines", async (req: Request, res: Response) => {
         items: result.rows,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_WINES] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "analytics wines error",
-    });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_WINES", e, 500, res);
   }
 });
 
@@ -386,12 +412,8 @@ app.get("/api/analytics/billing", async (req: Request, res: Response) => {
         item: result.rows[0] ?? null,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_BILLING] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "analytics billing error",
-    });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_BILLING", e, 500, res);
   }
 });
 
@@ -467,12 +489,8 @@ app.get("/api/analytics/cta", async (req: Request, res: Response) => {
         item: result.rows[0] ?? null,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_CTA] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "analytics cta error",
-    });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_CTA", e, 500, res);
   }
 });
 
@@ -543,12 +561,8 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
         by_lang: byLangResult.rows,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_GEO_LANG] Error:", e?.message ?? String(e));
-    return res.status(500).json({
-      ok: false,
-      error: e?.message ?? "analytics geo-lang error",
-    });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_GEO_LANG", e, 500, res);
   }
 });
 
@@ -599,29 +613,57 @@ app.get("/api/analytics/context", async (req: Request, res: Response) => {
         by_context: result.rows,
       })
     );
-  } catch (e: any) {
-    console.error("[ANALYTICS_CONTEXT] Error:", e?.message ?? String(e));
-    return res.status(500).json({ ok: false, error: e?.message ?? "analytics context error" });
+  } catch (e) {
+    return sanitizeError("ANALYTICS_CONTEXT", e, 500, res);
   }
 });
 
 /* =======================
-   Chat
+   Chat — rate-limited, validated, sanitized
 ======================= */
+
+const ChatBody = z.object({
+  session_id: z.string().min(8).max(100),
+  userText: z.string().min(1).max(2000), // mensajes cortos, evita abuse + OpenAI cost
+});
 
 app.post("/chat", async (req: Request, res: Response) => {
   try {
-    if (!redis) throw new Error("Redis not configured");
+    if (!redis) {
+      console.error("[CHAT] redis not configured");
+      return res.status(503).json({ ok: false, error: "service_unavailable" });
+    }
 
-    const session_id = assertString("session_id", req.body.session_id);
-    const userText = assertString("userText", req.body.userText);
+    const parsed = ChatBody.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ ok: false, error: "invalid_body" });
+    }
+    const { session_id, userText } = parsed.data;
+
+    // Rate limit doble: por sesión (20/min) y por IP (60/min).
+    // Sesión evita bucle abusivo de un cliente; IP evita multi-sesión spam.
+    const ip = (req.headers["x-forwarded-for"] as string || "").split(",")[0].trim() || req.ip || "unknown";
+    const [bySession, byIp] = await Promise.all([
+      rateLimitRedis(redis, `chat:sess:${session_id}`, 60_000, 20),
+      rateLimitRedis(redis, `chat:ip:${ip}`, 60_000, 60),
+    ]);
+    const limited = !bySession.allowed ? bySession : !byIp.allowed ? byIp : null;
+    if (limited) {
+      res.setHeader("Retry-After", Math.ceil(limited.retryAfterMs / 1000));
+      return res.status(429).json({ ok: false, error: "rate_limited", retry_after_ms: limited.retryAfterMs });
+    }
 
     const raw = await redis.get(sessionKey(session_id));
     if (!raw) {
       return res.status(404).json({ ok: false, error: "session not found" });
     }
 
-    const state = JSON.parse(raw) as SessionState;
+    let state: SessionState;
+    try {
+      state = JSON.parse(raw) as SessionState;
+    } catch {
+      return res.status(500).json({ ok: false, error: "session_corrupt" });
+    }
 
     const history: HistoryItem[] = [
       ...(state.history ?? []),
@@ -635,7 +677,7 @@ app.post("/chat", async (req: Request, res: Response) => {
       agent_context: state.agent_context,
     });
 
-    const assistantText = chatResp.text.trim();
+    const assistantText = (chatResp.text || "").trim();
 
     const nextState: SessionState = {
       ...state,
@@ -648,14 +690,9 @@ app.post("/chat", async (req: Request, res: Response) => {
 
     await redis.set(sessionKey(session_id), JSON.stringify(nextState), "EX", SESSION_TTL_SECONDS);
 
-    res.json({
-      ok: true,
-      session_id,
-      text: assistantText,
-    });
-  } catch (e: any) {
-    console.error("[CHAT] Error:", e?.message ?? String(e));
-    res.status(400).json({ ok: false, error: e?.message ?? "chat error" });
+    res.json({ ok: true, session_id, text: assistantText });
+  } catch (e) {
+    return sanitizeError("CHAT", e, 500, res);
   }
 });
 
@@ -686,16 +723,31 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     return next();
   }
 
+  // Formato mínimo para cualquier QR: alfa-num + guiones. Bloquea exploración
+  // con caracteres raros antes de consumir cupo de n8n lookup.
+  if (!/^[A-Za-z0-9_-]{3,64}$/.test(code)) {
+    return res.status(400).send("invalid code");
+  }
+
+  // Rate limit por IP: 120/min. Un consumidor legítimo nunca hace ni 10/min.
+  // Objetivo: frenar scrapers/fuerza bruta de tokens QR.
+  const ip = (req.headers["x-forwarded-for"] as string || "").split(",")[0].trim() || req.ip || "unknown";
+  const rl = await rateLimitRedis(redis, `qr:ip:${ip}`, 60_000, 120);
+  if (!rl.allowed) {
+    res.setHeader("Retry-After", Math.ceil(rl.retryAfterMs / 1000));
+    return res.status(429).send("rate_limited");
+  }
+
   if (!code.startsWith("Q")) {
     try {
       if (!N8N_QR_LOOKUP_URL) {
-        return res.status(500).send("QR Config Missing");
+        return res.status(503).send("QR lookup not configured");
       }
 
       const r = await fetch(`${N8N_QR_LOOKUP_URL}?code=${encodeURIComponent(code)}`);
 
       if (!r.ok) {
-        return res.status(404).send("invalid QR (n8n)");
+        return res.status(404).send("invalid QR");
       }
 
       const data = (await r.json()) as QRLookupResponse;
@@ -714,7 +766,8 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
       const ctxParam = contextTag ? `&ctx=${encodeURIComponent(contextTag)}` : "";
       const redirectUrl = `https://qr2.sommelierlab.com/?vino_id=${encodeURIComponent(vinoIdUpper)}&anyada=${encodeURIComponent(anyada)}&token=${encodeURIComponent(code)}${ctxParam}`;
 
-      console.log(`[QR] Resolved ${code} -> ${redirectUrl}`);
+      // Token parcialmente redactado: evita dejar tokens completos en Railway logs.
+      console.log(`[QR] Resolved ${redactToken(code)} -> vino=${vinoIdUpper} anyada=${anyada}`);
 
       if (N8N_QR_SCAN_URL) {
         await fetch(
@@ -723,9 +776,9 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
       }
 
       return res.redirect(302, redirectUrl);
-    } catch (e: any) {
-      console.error("[QR] Error:", e?.message ?? String(e));
-      return res.status(500).send("Resolver Error");
+    } catch (e) {
+      console.error("[QR]", e instanceof Error ? e.message : String(e));
+      return res.status(500).send("resolver_error");
     }
   }
 
@@ -742,11 +795,7 @@ app.get("/:code", async (req: Request, res: Response, next: NextFunction) => {
     fetch(N8N_QR_SCAN_URL, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        token: code,
-        vino_id: vino,
-        anyada,
-      }),
+      body: JSON.stringify({ token: code, vino_id: vino, anyada }),
     }).catch(() => {});
   }
 
