@@ -447,7 +447,7 @@ app.get("/api/analytics/cta", async (req: Request, res: Response) => {
     const sql = `
       WITH scoped AS (
         SELECT *
-       FROM public.events
+       FROM sommelierlab.events_all
         WHERE tenant_id = $1
           AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       )
@@ -527,7 +527,7 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
-      FROM public.events
+      FROM sommelierlab.events_all
       WHERE tenant_id = $1
         AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       GROUP BY COALESCE(geo_country, 'unknown')
@@ -540,7 +540,7 @@ app.get("/api/analytics/geo-lang", async (req: Request, res: Response) => {
         COUNT(*) FILTER (WHERE event_type = 'page_view') AS page_view_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'enoturismo') AS enoturismo_click_count
-      FROM public.events
+      FROM sommelierlab.events_all
       WHERE tenant_id = $1
         AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       GROUP BY COALESCE(lang, 'unknown')
@@ -596,7 +596,7 @@ app.get("/api/analytics/context", async (req: Request, res: Response) => {
         COUNT(*) FILTER (WHERE event_type = 'cta_click' AND cta_key = 'comprar') AS buy_click_count,
         COUNT(*) FILTER (WHERE event_type = 'sommelier_open') AS sommelier_open_count,
         COUNT(*) FILTER (WHERE event_type = 'play_audio') AS play_audio_count
-      FROM public.events
+      FROM sommelierlab.events_all
       WHERE tenant_id = $1
         AND date_trunc('month', timestamp)::date = date_trunc('month', $2::date)
       GROUP BY COALESCE(context, 'unknown'), COALESCE(sub_context, '')
